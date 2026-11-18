@@ -23,6 +23,9 @@ RAW="${REPO_RAW:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
 CTID="${CTID:-}"
 CTNAME="${CTNAME:-srt-relay}"
 SRT_PORT="${SRT_PORT:-8890}"
+RTMP_PORT="${RTMP_PORT:-1935}"
+HLS_PORT="${HLS_PORT:-8888}"
+WEBRTC_PORT="${WEBRTC_PORT:-8889}"
 DEBIAN="${DEBIAN:-12}"
 CORES="${CORES:-1}"
 RAM="${RAM:-512}"
@@ -224,7 +227,10 @@ if ! pct push "$CTID" "$TMP/guest-setup.sh" /root/guest-setup.sh; then
 fi
 
 LOG="$TMP/guest.log"
-if ! pct exec "$CTID" -- env SRT_PORT="$SRT_PORT" bash /root/guest-setup.sh >"$LOG" 2>&1; then
+if ! pct exec "$CTID" -- env \
+        SRT_PORT="$SRT_PORT" RTMP_PORT="$RTMP_PORT" \
+        HLS_PORT="$HLS_PORT" WEBRTC_PORT="$WEBRTC_PORT" \
+        bash /root/guest-setup.sh >"$LOG" 2>&1; then
     fout "installatie in de container mislukte (laatste regels):"
     tail -n 25 "$LOG" | sed 's/^/     /'
     zeg "     Volledige log op de host: pct exec $CTID -- journalctl -u srt-relay -n 50"
@@ -255,11 +261,11 @@ else
     fout "UDP-poort $SRT_PORT luistert niet in de container"
 fi
 
-WEB="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$IP:8888/controle/")"
+WEB="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$IP:$HLS_PORT/controle/")"
 if [ "$WEB" = "200" ]; then
-    ok "relay antwoordt op http://$IP:8888 (HTTP 200)"
+    ok "relay antwoordt op http://$IP:$HLS_PORT (HTTP 200)"
 else
-    fout "geen antwoord van http://$IP:8888 (kreeg '$WEB')"
+    fout "geen antwoord van http://$IP:$HLS_PORT (kreeg '$WEB')"
 fi
 
 # ---------------------------------------------------------------- samenvatting
@@ -276,12 +282,12 @@ zeg "  SRT-poort:        $SRT_PORT/udp"
 zeg ""
 zeg "  Publiceren (OBS, ffmpeg, telefoon):"
 zeg "     srt://$IP:$SRT_PORT?streamid=publish:mijnstream:tom:$WACHTWOORD"
-zeg "     rtmp://$IP:1935   sleutel: mijnstream?user=tom&pass=$WACHTWOORD"
+zeg "     rtmp://$IP:$RTMP_PORT   sleutel: mijnstream?user=tom&pass=$WACHTWOORD"
 zeg ""
 zeg "  Kijken:"
 zeg "     srt://$IP:$SRT_PORT?streamid=read:mijnstream"
-zeg "     http://$IP:8889/mijnstream/     (WebRTC, laagste vertraging)"
-zeg "     http://$IP:8888/mijnstream/     (HLS)"
+zeg "     http://$IP:$WEBRTC_PORT/mijnstream/     (WebRTC, laagste vertraging)"
+zeg "     http://$IP:$HLS_PORT/mijnstream/     (HLS)"
 zeg ""
 zeg "  Beheer in de container:"
 zeg "     pct exec $CTID -- srt-streams            # wat staat er online"

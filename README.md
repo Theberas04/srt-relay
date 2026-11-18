@@ -111,6 +111,9 @@ Als omgevingsvariabele mee te geven aan de one-liner, bijvoorbeeld:
 | `CTID` | eerste vrije vanaf 130 | container-ID |
 | `CTNAME` | `srt-relay` | hostnaam |
 | `SRT_PORT` | `8890` | UDP-poort van het relay |
+| `RTMP_PORT` | `1935` | RTMP-poort (OBS) |
+| `HLS_PORT` | `8888` | HTTP-poort voor HLS |
+| `WEBRTC_PORT` | `8889` | HTTP-poort voor WebRTC |
 | `DEBIAN` | `12` | gastversie (13 vraagt Proxmox 8.2+) |
 | `CORES` / `RAM` / `DISK` | `1` / `512` / `3` | formaat van de container |
 | `BRIDGE` | `vmbr0` | netwerkbrug (DHCP) |
@@ -140,10 +143,12 @@ De volledige config met alle mogelijkheden staat in de container als
 
 ## Wat er getest is
 
-* De installer doorloopt in de testbank (`tests/test-installer.sh`) zes
-  scenario's met nep-`pct`: alleen ophalen, een gewone installatie, een
-  container die niet start (met diagnose), een onbereikbare gast, een bezet
-  container-ID en het kiezen van het eerste vrije ID.
+* De installer doorloopt in de testbank (`tests/test-installer.sh`) zeven
+  scenario's met nep-`pct`/`pveam`: alleen ophalen, bestanden echt van GitHub
+  halen, een gewone installatie, een container die niet start (met diagnose),
+  een onbereikbare gast, een bezet container-ID en het kiezen van het eerste
+  vrije ID. De buiten-controle meet tegen een echte HTTP-server, niet tegen
+  een toevallig draaiende dienst.
 * De containerinstallatie is los gedraaid: installeren, dienst starten,
   zelftest (publiceren via SRT met wachtwoord en het beeld terugkijken),
   hulpmiddelen, en een tweede run die het wachtwoord en de streams laat staan.

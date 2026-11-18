@@ -92,11 +92,10 @@ run() {
   echo "################################################################"
   echo "# $naam"
   echo "################################################################"
-  local uit
-  uit="$(env PATH="$STUB:$PATH" CTDIR="$CTDIR" PVE_ETC=/tmp/srt-relay-test/pve "$@" \
+  LAATSTE_UIT="$(env PATH="$STUB:$PATH" CTDIR="$CTDIR" PVE_ETC=/tmp/srt-relay-test/pve "$@" \
         bash "$HIER/../srt-relay.sh" 2>&1)"
   local code=$?
-  printf '%s\n' "$uit"
+  printf '%s\n' "$LAATSTE_UIT"
   echo "--- exitcode $code (verwacht $verwacht) ---"
   if [ "$code" -ne "$verwacht" ]; then
     echo "MISLUKT: verkeerde exitcode"
@@ -107,6 +106,22 @@ run() {
 
 mkdir -p /tmp/srt-relay-test/pve
 rm -f "$CTDIR"/* 2>/dev/null
+
+# Een nep-relay op een eigen poort, zodat de HTTP-controle van buitenaf echt
+# gemeten wordt (en niet afhangt van wat er toevallig op de testmachine draait).
+HLS_PORT=18888
+WEBMAP=/tmp/srt-relay-test/web
+mkdir -p "$WEBMAP/controle"
+printf 'ok\n' > "$WEBMAP/controle/index.html"
+python3 -m http.server "$HLS_PORT" --bind 127.0.0.1 --directory "$WEBMAP" >/dev/null 2>&1 &
+WEBPID=$!
+trap 'kill $WEBPID 2>/dev/null; true' EXIT
+sleep 1
+if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HLS_PORT/controle/" | grep -q 200; then
+  echo "nep-relay op 127.0.0.1:$HLS_PORT draait (pid $WEBPID)"
+else
+  echo "MISLUKT: kon de nep-relay niet starten"; exit 1
+fi
 
 # Scenario 0: FETCH_ONLY (mag niets aanmaken)
 run "FETCH_ONLY: alleen bestanden ophalen" 0 FETCH_ONLY=1 || exit 1
@@ -131,10 +146,15 @@ if [ -n "${REPO_RAW:-}" ]; then
   rm -rf "$WERKMAP"
 fi
 
-# Scenario 1: alles goed
+# Scenario 1: alles goed (gast = de nep-relay op 127.0.0.1)
 rm -f "$CTDIR"/*
-run "gewone installatie" 0 CTID=140 || exit 1
+run "gewone installatie" 0 CTID=140 GAST_IP=127.0.0.1 HLS_PORT="$HLS_PORT" || exit 1
 [ -f "$CTDIR/140" ] || { echo "MISLUKT: container 140 niet aangemaakt"; exit 1; }
+if printf '%s' "$LAATSTE_UIT" | grep -q "relay antwoordt op http://127.0.0.1:$HLS_PORT"; then
+  echo "ok: HTTP-controle van buitenaf geslaagd"
+else
+  echo "MISLUKT: HTTP-controle van buitenaf niet geslaagd"; exit 1
+fi
 
 # Scenario 2: starten faalt in alle drie de trappen
 rm -f "$CTDIR"/*
@@ -167,7 +187,7 @@ fi
 rm -f "$CTDIR"/*
 : > "$CTDIR/130"
 uit="$(env PATH="$STUB:$PATH" CTDIR="$CTDIR" PVE_ETC=/tmp/srt-relay-test/pve \
-      bash "$HIER/../srt-relay.sh" 2>&1)"
+      GAST_IP=127.0.0.1 HLS_PORT="$HLS_PORT" bash "$HIER/../srt-relay.sh" 2>&1)"
 if printf '%s' "$uit" | grep -q "container-ID 131" && [ -f "$CTDIR/131" ]; then
   echo "ok: eerste vrije ID (131) gekozen"
 else
