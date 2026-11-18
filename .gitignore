@@ -1,0 +1,4 @@
+# Testbank: de nep-pct/pveam-stubs worden door tests/test-installer.sh gemaakt
+tests/stub/
+/tmp/
+*.bak

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    name: Syntax en stijl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n
+        run: |
+          for bestand in srt-relay.sh guest-setup.sh tests/test-installer.sh; do
+            bash -n "$bestand"
+            echo "ok: $bestand"
+          done
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning srt-relay.sh guest-setup.sh tests/test-installer.sh
+
+      - name: Verwijzingen compleet
+        run: |
+          # Elk bestand dat de installer noemt moet bestaan, en guest-setup.sh
+          # moet de marker bevatten waar srt-relay.sh op controleert.
+          for bestand in guest-setup.sh srt-relay.sh README.md docs/img/speler.png; do
+            test -s "$bestand" || { echo "ontbreekt: $bestand"; exit 1; }
+            echo "ok: $bestand"
+          done
+          grep -q "SRT-RELAY-GUEST-SETUP" guest-setup.sh || { echo "marker ontbreekt in guest-setup.sh"; exit 1; }
+          grep -q "raw.githubusercontent.com/Theberas04/srt-relay" srt-relay.sh \
+            || { echo "one-liner ontbreekt in srt-relay.sh"; exit 1; }
+
+  test:
+    name: Testbank met nep-pct
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scenario's doorlopen
+        run: bash tests/test-installer.sh
+
+  fetch:
+    name: One-liner haalt alles van GitHub
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ophalen van raw.githubusercontent.com
+        env:
+          REPO_RAW: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}
+        run: bash tests/test-installer.sh
