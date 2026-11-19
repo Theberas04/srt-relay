@@ -1,515 +1,473 @@
 #!/usr/bin/env bash
+#
 # SRT-RELAY-GUEST-SETUP
 #
-# Installeert de SRT-relay (MediaMTX) in deze machine/container. Wordt door
-# srt-relay.sh in de nieuwe Proxmox-container gestart, maar je kunt dit script
-# ook los draaien op Debian/Ubuntu:
+# Draait ín de container (als root). Zet de eigen relay neer: de hub (SRT, RTMP,
+# HLS, live TS, momentopnamen, API) en het uitzendbord. Geen kant-en-klare
+# streamserver: de hub is eigen code (hub/hub.py) bovenop ffmpeg en libsrt.
 #
-#   sudo SRT_PORT=8890 bash guest-setup.sh
+# Wordt normaal door srt-relay.sh op de Proxmox-host gestart, maar kan ook los:
+#   bash guest-setup.sh
 #
-# Alles is herhaalbaar: een tweede run laat het wachtwoord en de streams staan.
+# Omgevingsvariabelen: SRT_PORT RTMP_PORT HTTP_PORT BORD_POORT REPO BRANCH REPO_RAW
+#
 set -uo pipefail
 
+REPO="${REPO:-Theberas04/srt-relay}"
+BRANCH="${BRANCH:-main}"
+RAW="${REPO_RAW:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
+
 SRT_PORT="${SRT_PORT:-8890}"
-RTSP_PORT="${RTSP_PORT:-8554}"
 RTMP_PORT="${RTMP_PORT:-1935}"
-HLS_PORT="${HLS_PORT:-8888}"
-WEBRTC_PORT="${WEBRTC_PORT:-8889}"
-API_PORT="${API_PORT:-9997}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/srt-relay}"
-MEDIAMTX_VERSION="${MEDIAMTX_VERSION:-1.21.4}"
-SERVICE_NAME="${SERVICE_NAME:-srt-relay}"
+HTTP_PORT="${HTTP_PORT:-8080}"
+BORD_POORT="${BORD_POORT:-8095}"
 PUB_USER="${PUB_USER:-tom}"
 
-CONF="$INSTALL_DIR/mediamtx.yml"
-ENVFILE="$INSTALL_DIR/srt-relay.env"
-
-if [ "$(id -u)" -eq 0 ]; then MODE=system; else MODE=user; fi
-if [ "$MODE" = user ]; then
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-fi
-
-# Roept systemctl aan op de juiste plek (systeem- of gebruikersservice).
-dienst() {
-    if [ "$MODE" = system ]; then
-        systemctl "$@"
-    else
-        systemctl --user "$@"
-    fi
-}
+BASE="/opt/srt-relay"
+ETC="/etc/srt-relay"
+MEDIA="/srv/streams/bronnen"
+WERK="/srv/streams/werk"
+HLS="/var/lib/srt-relay/hls"
 
 FOUTEN=0
-stap() { printf '\n== %s\n' "$*"; }
-ok()   { printf 'ok   %s\n' "$*"; }
-let_op(){ printf 'let op %s\n' "$*"; }
-fout() { printf '[fout] %s\n' "$*"; FOUTEN=$((FOUTEN + 1)); }
+zeg()  { printf '%s\n' "$*"; }
+stap() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+ok()   { printf '  \033[32mok\033[0m   %s\n' "$*"; }
+let_op(){ printf '  \033[33mlet op\033[0m %s\n' "$*"; }
+fout() { printf '  \033[31m[fout]\033[0m %s\n' "$*"; FOUTEN=$((FOUTEN + 1)); }
 
-stap "Systeem"
+# ---------------------------------------------------------------- controles
 
-if [ "$MODE" = system ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1 || let_op "apt-get update gaf een waarschuwing"
-        if apt-get install -y -qq --no-install-recommends \
-                ffmpeg curl ca-certificates openssl python3 >/dev/null 2>&1; then
-            ok "ffmpeg, curl, openssl en python3 aanwezig"
-        else
-            fout "kon ffmpeg/curl/python3 niet installeren"
-        fi
-    else
-        let_op "geen apt-get: ik ga ervan uit dat ffmpeg, curl, openssl en python3 er al staan"
-    fi
-else
-    let_op "geen root: pakketten niet geïnstalleerd, alleen de service wordt een gebruikersservice"
+stap "Controles in de container"
+
+if [ "$(id -u)" -ne 0 ]; then
+    fout "dit script moet als root draaien (nu uid $(id -u))"
+    exit 1
+fi
+ok "root"
+
+for cmd in apt-get curl python3; do
+    command -v "$cmd" >/dev/null 2>&1 && ok "$cmd" || fout "$cmd ontbreekt"
+done
+[ "$FOUTEN" -eq 0 ] || exit 1
+
+zeg "  $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+
+# ---------------------------------------------------------------- pakketten
+
+stap "Pakketten"
+
+export DEBIAN_FRONTEND=noninteractive
+if ! apt-get update -qq >/dev/null 2>&1; then
+    let_op "apt-get update gaf een melding; toch verder"
 fi
 
-for cmd in ffmpeg curl openssl python3; do
-    if command -v "$cmd" >/dev/null 2>&1; then ok "$cmd"; else fout "$cmd ontbreekt"; fi
-done
-if [ "$FOUTEN" -ne 0 ]; then
-    printf "\n[stoppen] los eerst de ontbrekende programma's op.\n"
+# ffmpeg is het rekenwerk (beeld en geluid). libsrt komt mee als ffmpeg-afhankelijkheid
+# en wordt door de hub met ctypes aangestuurd; python3 draait de hub zelf.
+if apt-get install -y -qq --no-install-recommends ffmpeg python3 curl ca-certificates \
+        >/tmp/apt.log 2>&1; then
+    ok "ffmpeg + python3 geïnstalleerd"
+else
+    fout "pakketten installeren mislukte"
+    tail -n 15 /tmp/apt.log | sed 's/^/       /'
     exit 1
 fi
 
-case "$(uname -m)" in
-    x86_64|amd64) ARCH=amd64 ;;
-    aarch64|arm64) ARCH=arm64 ;;
-    armv7l) ARCH=armv7 ;;
-    *) fout "onbekende architectuur $(uname -m)"; exit 1 ;;
-esac
-ok "architectuur $ARCH"
-
-stap "MediaMTX"
-
-mkdir -p "$INSTALL_DIR" || { fout "kon $INSTALL_DIR niet aanmaken"; exit 1; }
-
-if [ -x "$INSTALL_DIR/mediamtx" ] && "$INSTALL_DIR/mediamtx" --version 2>/dev/null | grep -q "^v"; then
-    ok "mediamtx $("$INSTALL_DIR/mediamtx" --version) staat er al"
+if command -v ffmpeg >/dev/null 2>&1; then
+    ok "$(ffmpeg -version | head -1 | cut -d' ' -f1-3)"
 else
-    TARBALL="mediamtx_v${MEDIAMTX_VERSION}_linux_${ARCH}.tar.gz"
-    URL="https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/${TARBALL}"
-    TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' EXIT
-    if curl -fsSL --max-time 180 -o "$TMP/m.tar.gz" "$URL"; then
-        if tar -xzf "$TMP/m.tar.gz" -C "$INSTALL_DIR" mediamtx mediamtx.yml 2>/dev/null \
-           || tar -xzf "$TMP/m.tar.gz" -C "$INSTALL_DIR"; then
-            chmod +x "$INSTALL_DIR/mediamtx"
-            # Het meegeleverde voorbeeldbewaren we, zodat je alle opties kunt nalezen.
-            [ -f "$INSTALL_DIR/mediamtx.yml" ] && mv -f "$INSTALL_DIR/mediamtx.yml" "$INSTALL_DIR/mediamtx-volledig-voorbeeld.yml"
-            ok "mediamtx $("$INSTALL_DIR/mediamtx" --version) geïnstalleerd in $INSTALL_DIR"
-        else
-            fout "uitpakken van $TARBALL mislukte"
-            exit 1
-        fi
-    else
-        fout "kon $URL niet downloaden"
-        exit 1
+    fout "ffmpeg staat er niet"
+fi
+
+# De hub praat via ctypes met de systeembibliotheek van libsrt. Zoek hem op naam,
+# zodat een andere versie (1.4, 1.5, of een andere sonaam) ook werkt.
+SRT_LIB="$(ldconfig -p 2>/dev/null | awk '/libsrt/ && /\.so\./ {print $1; exit}')"
+if [ -z "$SRT_LIB" ]; then
+    let_op "geen libsrt gevonden; nu libsrt1.5-gnutls proberen"
+    apt-get install -y -qq --no-install-recommends libsrt1.5-gnutls >>/tmp/apt.log 2>&1 || true
+    SRT_LIB="$(ldconfig -p 2>/dev/null | awk '/libsrt/ && /\.so\./ {print $1; exit}')"
+fi
+if [ -n "$SRT_LIB" ]; then ok "libsrt: $SRT_LIB"
+else fout "geen libsrt te vinden — SRT kan niet werken"; fi
+
+# De hub moet de bibliotheek ook echt kunnen laden; dat is een andere vraag dan of
+# het bestand bestaat (sonaam, ontbrekende afhankelijkheid).
+if python3 -c "
+import ctypes
+from ctypes.util import find_library
+naam = find_library('srt') or find_library('srt-gnutls')
+lib = ctypes.CDLL(naam)
+assert lib.srt_getversion() > 0
+" 2>/dev/null; then
+    ok "python3 kan libsrt laden"
+else
+    fout "python3 kan libsrt niet laden — de hub start wel maar weigert elke verbinding"
+fi
+
+# ---------------------------------------------------------------- code ophalen
+
+stap "Code van de relay ophalen"
+
+mkdir -p "$BASE/hub" "$BASE/dashboard"
+
+BESTANDEN="hub/hub.py hub/tssplit.py hub/srtkanaal.py dashboard/streams.py dashboard/uitzendbord.py dashboard/bord.html"
+
+for bestand in $BESTANDEN; do
+    doel="$BASE/$bestand"
+    if [ -f "$(dirname "${BASH_SOURCE[0]}")/$bestand" ]; then
+        cp "$(dirname "${BASH_SOURCE[0]}")/$bestand" "$doel"     # naast dit script (checkout)
+    elif ! curl -fsSL --max-time 60 -o "$doel" "$RAW/$bestand"; then
+        fout "kon $bestand niet ophalen van $RAW"
+        continue
     fi
+    if [ -s "$doel" ]; then ok "$bestand ($(wc -c <"$doel") bytes)"
+    else fout "$bestand is leeg"; fi
+done
+
+if [ "$FOUTEN" -gt 0 ]; then
+    fout "de code is niet compleet — stoppen voordat er iets half draait"
+    exit 1
 fi
 
-stap "Configuratie"
-
-if [ -f "$CONF" ] && grep -q 'pass: ' "$CONF"; then
-    WACHTWOORD="$(sed -n "/^  - user: ${PUB_USER}$/,/permissions/p" "$CONF" | awk '/^ *pass:/{print $2; exit}')"
-    ok "bestaande config hergebruikt (wachtwoord blijft hetzelfde)"
-fi
-if [ -z "${WACHTWOORD:-}" ]; then
-    WACHTWOORD="$(openssl rand -hex 9)"
-    ok "nieuw wachtwoord gegenereerd"
+if python3 -m py_compile "$BASE"/hub/*.py "$BASE"/dashboard/*.py 2>/tmp/pyc.log; then
+    ok "alle pythonbestanden zijn leesbaar"
+else
+    fout "een van de bestanden is geen geldige python"
+    sed 's/^/       /' /tmp/pyc.log
+    exit 1
 fi
 
-cat > "$CONF" <<EOF
-###############################################
-# SRT-relay / livestream-hub (MediaMTX)
-# Gegenereerd door guest-setup.sh — aanpassen mag, maar laat de
-# inloggegevens staan als je de streams niet opnieuw wilt instellen.
-#
-# Publiceren:  srt://<dit-ip>:$SRT_PORT?streamid=publish:<naam>:$PUB_USER:$WACHTWOORD
-# Kijken:      srt://<dit-ip>:$SRT_PORT?streamid=read:<naam>
-# Browser:     http://<dit-ip>:$WEBRTC_PORT/<naam>/    (WebRTC)
-#              http://<dit-ip>:$HLS_PORT/<naam>/       (HLS)
-###############################################
+# ---------------------------------------------------------------- geheimen
 
-logLevel: info
-logDestinations: [stdout]
+stap "Wachtwoorden en instellingen"
 
-rtsp: true
-rtmp: true
-hls: true
-webrtc: true
-srt: true
-api: true
+mkdir -p "$ETC"
+chmod 700 "$ETC"
 
-rtspAddress: :$RTSP_PORT
-rtmpAddress: :$RTMP_PORT
-hlsAddress: :$HLS_PORT
-webrtcAddress: :$WEBRTC_PORT
-srtAddress: :$SRT_PORT
-apiAddress: 127.0.0.1:$API_PORT
+heeft() { [ -f "$1" ] && grep -q "^$2=" "$1"; }
+waarde() { sed -n "s/^$2=//p" "$1" | head -1; }
 
-srtMinLatency: 120ms
+PUB_PASS=""
+if heeft "$ETC/relay.env" PUB_PASS; then
+    PUB_PASS="$(waarde "$ETC/relay.env" PUB_PASS)"
+    ok "bestaand publiceerwachtwoord bewaard"
+fi
+[ -n "$PUB_PASS" ] || PUB_PASS="$(openssl rand -hex 12 2>/dev/null \
+    || python3 -c 'import secrets; print(secrets.token_hex(12))')"
 
-authInternalUsers:
-    # Publiceren mag alleen met gebruikersnaam en wachtwoord.
-  - user: $PUB_USER
-    pass: $WACHTWOORD
-    ips: []
-    permissions:
-      - action: publish
-
-    # Kijken mag iedereen met de link. Wil je kijken achter een wachtwoord,
-    # zet deze twee regels dan onder de gebruiker hierboven en haal ze hier weg.
-  - user: any
-    pass:
-    ips: []
-    permissions:
-      - action: read
-      - action: playback
-
-    # Beheer/API alleen vanaf deze machine zelf.
-  - user: any
-    pass:
-    ips: ["127.0.0.1", "::1"]
-    permissions:
-      - action: api
-      - action: metrics
-
-# Bronnen die de relay zelf binnenhaalt staan hieronder. Toevoegen gaat het
-# makkelijkst met:  srt-feed <naam> <bron-url>
-paths:
-  all_others:
-EOF
-ok "config geschreven: $CONF"
-
-cat > "$ENVFILE" <<EOF
-# Instellingen van de SRT-relay op deze machine (gelezen door srt-feed en srt-streams)
-INSTALL_DIR=$INSTALL_DIR
-CONF=$CONF
-SERVICE_NAME=$SERVICE_NAME
-MODE=$MODE
+cat >"$ETC/relay.env" <<EOF
+# Instellingen van de relay (hub). Beheer: systemctl restart srt-relay
 SRT_PORT=$SRT_PORT
-RTSP_PORT=$RTSP_PORT
 RTMP_PORT=$RTMP_PORT
-HLS_PORT=$HLS_PORT
-WEBRTC_PORT=$WEBRTC_PORT
-API_PORT=$API_PORT
+HTTP_PORT=$HTTP_PORT
 PUB_USER=$PUB_USER
+PUB_PASS=$PUB_PASS
+SRT_LATENCY=120
+HLS_DIR=$HLS
+HLS_SEGMENT=2
+HLS_KEEP=6
+RTMP_NAAM=obs
 EOF
-ok "instellingen vastgelegd: $ENVFILE"
+chmod 600 "$ETC/relay.env"
+ok "relay-instellingen in $ETC/relay.env"
 
-stap "Dienst"
+BORD_WW=""
+if heeft "$ETC/uitzendbord.env" BORD_WACHTWOORD; then
+    BORD_WW="$(waarde "$ETC/uitzendbord.env" BORD_WACHTWOORD)"
+    ok "bestaand bordwachtwoord bewaard"
+fi
+[ -n "$BORD_WW" ] || BORD_WW="$(openssl rand -hex 9 2>/dev/null \
+    || python3 -c 'import secrets; print(secrets.token_hex(9))')"
 
-if [ "$MODE" = system ]; then
-    UNIT=/etc/systemd/system/$SERVICE_NAME.service
-    cat > "$UNIT" <<EOF
+cat >"$ETC/uitzendbord.env" <<EOF
+# Instellingen van het uitzendbord. Beheer: systemctl restart srt-relay-bord
+BORD_POORT=$BORD_POORT
+BORD_WACHTWOORD=$BORD_WW
+SRT_API=http://127.0.0.1:$HTTP_PORT
+SRT_PUB_HOST=127.0.0.1
+SRT_PORT=$SRT_PORT
+PUB_USER=$PUB_USER
+SRT_PUB_PASS=$PUB_PASS
+SRT_MEDIA_DIR=$MEDIA
+SRT_WERK_DIR=$WERK
+EOF
+chmod 600 "$ETC/uitzendbord.env"
+ok "bord-instellingen in $ETC/uitzendbord.env"
+
+mkdir -p "$MEDIA" "$WERK" "$HLS"
+ok "mappen: $MEDIA, $WERK, $HLS"
+
+# ---------------------------------------------------------------- diensten
+
+stap "Diensten"
+
+cat >/etc/systemd/system/srt-relay.service <<EOF
 [Unit]
-Description=SRT-relay / livestream-hub (MediaMTX)
+Description=SRT-relay / livestream-hub (eigen hub)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/mediamtx $CONF
+ExecStart=/usr/bin/python3 $BASE/hub/hub.py --env $ETC/relay.env
 Restart=always
 RestartSec=3
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    if dienst enable --now "$SERVICE_NAME" >/dev/null 2>&1; then ok "dienst $SERVICE_NAME actief (systeemservice)"; else fout "kon $SERVICE_NAME niet starten"; fi
-else
-    UNIT="$HOME/.config/systemd/user/$SERVICE_NAME.service"
-    mkdir -p "$(dirname "$UNIT")"
-    cat > "$UNIT" <<EOF
+
+cat >/etc/systemd/system/srt-relay-bord.service <<EOF
 [Unit]
-Description=SRT-relay / livestream-hub (MediaMTX)
+Description=SRT-relay uitzendbord
+After=network-online.target srt-relay.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/mediamtx $CONF
+ExecStart=/usr/bin/python3 $BASE/dashboard/uitzendbord.py --env $ETC/uitzendbord.env
 Restart=always
 RestartSec=3
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-    systemctl --user daemon-reload
-    if dienst enable --now "$SERVICE_NAME" >/dev/null 2>&1; then ok "dienst $SERVICE_NAME actief (gebruikersservice)"; else fout "kon $SERVICE_NAME niet starten"; fi
+
+systemctl daemon-reload
+systemctl enable --quiet srt-relay srt-relay-bord >/dev/null 2>&1
+systemctl restart srt-relay >/dev/null 2>&1
+systemctl restart srt-relay-bord >/dev/null 2>&1
+
+if systemctl is-active --quiet srt-relay; then ok "dienst srt-relay actief"
+else fout "dienst srt-relay start niet"; journalctl -u srt-relay -n 20 --no-pager | sed 's/^/       /'; fi
+
+if systemctl is-active --quiet srt-relay-bord; then ok "dienst srt-relay-bord actief"
+else fout "dienst srt-relay-bord start niet"; journalctl -u srt-relay-bord -n 20 --no-pager | sed 's/^/       /'; fi
+
+# De hub moet zijn poorten openen voordat de zelftest iets kan meten.
+for _ in $(seq 1 30); do
+    curl -fsS --max-time 2 "http://127.0.0.1:$HTTP_PORT/api/streams" >/dev/null 2>&1 && break
+    sleep 1
+done
+if curl -fsS --max-time 2 "http://127.0.0.1:$HTTP_PORT/api/streams" >/dev/null 2>&1; then
+    ok "hub antwoordt op http://127.0.0.1:$HTTP_PORT (API)"
+else
+    fout "hub antwoordt niet op de API — kijk in: journalctl -u srt-relay -n 40"
+    exit 1
 fi
+
+# ---------------------------------------------------------------- hulpmiddelen
 
 stap "Hulpmiddelen"
 
-write_tool() {
-    # $1 = naam, $2 = inhoud
-    ZIEL="$INSTALL_DIR/$1"
-    printf '%s\n' "$2" > "$ZIEL"
-    chmod +x "$ZIEL"
-    if [ "$MODE" = system ]; then
-        ln -sf "$ZIEL" "/usr/local/bin/$1"
-        ok "$1  ->  /usr/local/bin/$1"
-    else
-        mkdir -p "$HOME/.local/bin"
-        ln -sf "$ZIEL" "$HOME/.local/bin/$1"
-        ok "$1  ->  $HOME/.local/bin/$1"
-    fi
-}
+cat >/usr/local/bin/srt-streams <<EOF
+#!/usr/bin/env bash
+# Wat staat er online op deze relay?
+curl -fsS --max-time 5 http://127.0.0.1:$HTTP_PORT/api/streams | python3 -c '
+import json, sys
+gegevens = json.load(sys.stdin)
+stromen = gegevens.get("streams", [])
+if not stromen:
+    print("er is nu niets in de lucht")
+for s in stromen:
+    sporen = ", ".join(s.get("sporen") or []) or "nog geen sporen"
+    print("%-16s %8.1f MB  kijkers %2d  segmenten %4d  %s" % (
+        s.get("naam", "?"), s.get("bytes", 0) / 1e6, s.get("kijkers", 0),
+        s.get("segmenten", 0), sporen))
+' 2>/dev/null || echo "de relay antwoordt niet op poort $HTTP_PORT"
+EOF
+chmod +x /usr/local/bin/srt-streams
+ok "srt-streams (wat staat er online)"
 
-FEED_PY=$(cat <<'PYEOF'
-#!/usr/bin/env python3
-"""Bron op je netwerk toevoegen aan de SRT-relay:  srt-feed <naam> <bron-url> [--on-demand]
-
-Verwijderen: srt-feed --verwijder <naam>       Overzicht: srt-streams
-
-Leest de instellingen uit srt-relay.env naast dit bestand, dus de poorten en
-paden komen altijd overeen met wat de installer heeft neergezet.
-"""
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
-import time
-import urllib.request
-
-MAP = os.path.dirname(os.path.realpath(__file__))
-ENV = os.path.join(MAP, "srt-relay.env")
-
-INSTALL_DIR = MAP
-SERVICE_NAME = "srt-relay"
-MODE = "system"
-SRT_PORT = "8890"
-HLS_PORT = "8888"
-WEBRTC_PORT = "8889"
-API_PORT = "9997"
-
-if os.path.exists(ENV):
-    with open(ENV) as fh:
-        for regel in fh:
-            if "=" in regel and not regel.strip().startswith("#"):
-                sleutel, waarde = regel.strip().split("=", 1)
-                globals()[sleutel] = waarde
-
-CONF = os.environ.get("CONF", os.path.join(INSTALL_DIR, "mediamtx.yml"))
-API = f"http://127.0.0.1:{API_PORT}/v3"
-NAAM_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def api(pad):
-    try:
-        with urllib.request.urlopen(f"{API}{pad}", timeout=4) as r:
-            return json.load(r)
-    except Exception:
-        return None
-
-
-def dienst_actief():
-    if MODE == "system":
-        opdracht = ["systemctl", "is-active", SERVICE_NAME]
-    else:
-        omgeving = dict(os.environ)
-        omgeving.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        opdracht = ["systemctl", "--user", "is-active", SERVICE_NAME]
-        return subprocess.run(opdracht, capture_output=True, text=True, env=omgeving).stdout.strip() == "active"
-    return subprocess.run(opdracht, capture_output=True, text=True).stdout.strip() == "active"
-
-
-def vind_path_blok(regels):
-    for i, r in enumerate(regels):
-        if r.rstrip() == "paths:":
-            return i
-    return None
-
-
-def haal_bron(regels, naam):
-    kop = f"  {naam}:"
-    for i, r in enumerate(regels):
-        if r.rstrip() == kop:
-            bron = None
-            for r2 in regels[i + 1:]:
-                if not r2.startswith(("    ", "\t")):
-                    break
-                if r2.strip().startswith("source:"):
-                    bron = r2.strip().split(":", 1)[1].strip()
-            return bron
-    return None
-
-
-def vervang_blok(regels, naam, blok):
-    kop = f"  {naam}:"
-    for i, r in enumerate(regels):
-        if r.rstrip() == kop:
-            j = i + 1
-            while j < len(regels) and regels[j].startswith(("    ", "\t")):
-                j += 1
-            return regels[:i] + blok + regels[j:]
-    p = vind_path_blok(regels)
-    if p is None:
-        raise SystemExit("FOUT: geen 'paths:'-blok in de config.")
-    return regels[:p + 1] + blok + regels[p + 1:]
-
-
-def wis_blok(regels, naam):
-    kop = f"  {naam}:"
-    for i, r in enumerate(regels):
-        if r.rstrip() == kop:
-            j = i + 1
-            while j < len(regels) and regels[j].startswith(("    ", "\t")):
-                j += 1
-            return regels[:i] + regels[j:], True
-    return regels, False
-
-
-def schrijf(regels, naam, weg=False):
-    shutil.copy2(CONF, CONF + ".bak")
-    with open(CONF, "w") as fh:
-        fh.writelines(regels)
-    time.sleep(2.5)
-    if not dienst_actief():
-        shutil.copy2(CONF + ".bak", CONF)
-        time.sleep(2.5)
-        raise SystemExit("FOUT: MediaMTX weigerde de nieuwe config — oude versie teruggezet.")
-    d = api(f"/paths/get/{naam}")
-    if weg:
-        print(f"  -> '{naam}' is weg." if d is None else f"  -> Let op: '{naam}' staat nog in de config.")
-    elif d and d.get("confName"):
-        print(f"  -> '{naam}' is bekend (config-regel: {d['confName']})")
-    else:
-        print(f"  -> Let op: '{naam}' staat nog niet in de API.")
-
-
-def main():
-    if "--verwijder" in sys.argv:
-        rest = [a for a in sys.argv[1:] if a != "--verwijder"]
-        if len(rest) != 1:
-            raise SystemExit("Gebruik: srt-feed --verwijder <naam>")
-        with open(CONF) as fh:
-            regels = fh.readlines()
-        nieuw, gevonden = wis_blok(regels, rest[0])
-        if not gevonden:
-            raise SystemExit(f"FOUT: '{rest[0]}' staat niet in de config.")
-        print(f"[verwijderen] {rest[0]}")
-        schrijf(nieuw, rest[0], weg=True)
-        return
-
-    args = [a for a in sys.argv[1:] if a != "--on-demand"]
-    if len(args) != 2:
-        raise SystemExit("Gebruik: srt-feed <naam> <bron-url> [--on-demand]\n"
-                         "Bijvoorbeeld: srt-feed voordeur rtsp://192.168.1.50:554/h264")
-    naam, bron = args
-    if not NAAM_RE.match(naam):
-        raise SystemExit("FOUT: naam mag alleen letters, cijfers, - en _ bevatten.")
-    if ":" not in bron or not bron.split(":", 1)[0].isalpha():
-        raise SystemExit("FOUT: bron moet een URL zijn, bijvoorbeeld rtsp://192.168.1.50:554/h264")
-
-    with open(CONF) as fh:
-        regels = fh.readlines()
-    oud = haal_bron(regels, naam)
-    blok = [f"  {naam}:\n", f"    source: {bron}\n"]
-    if "--on-demand" in sys.argv:
-        blok.append("    sourceOnDemand: true\n")
-    nieuw = vervang_blok(regels, naam, blok)
-    print(f"[{'wijzig' if oud else 'toevoegen'}] {naam} -> {bron}")
-    schrijf(nieuw, naam)
-    ip = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
-    ip = ip[0] if ip else "<dit-ip>"
-    print(f"Kijken:  http://{ip}:{WEBRTC_PORT}/{naam}/   of   srt://{ip}:{SRT_PORT}?streamid=read:{naam}")
-
-
-if __name__ == "__main__":
-    main()
-PYEOF
-)
-
-STREAMS_PY=$(cat <<'PYEOF'
-#!/usr/bin/env python3
-"""Overzicht van de streams op de SRT-relay:  srt-streams"""
-import json
-import os
-import subprocess
-import urllib.request
-
-MAP = os.path.dirname(os.path.realpath(__file__))
-ENV = os.path.join(MAP, "srt-relay.env")
-SRT_PORT, HLS_PORT, WEBRTC_PORT, API_PORT = "8890", "8888", "8889", "9997"
-
-if os.path.exists(ENV):
-    with open(ENV) as fh:
-        for regel in fh:
-            if "=" in regel and not regel.strip().startswith("#"):
-                sleutel, waarde = regel.strip().split("=", 1)
-                globals()[sleutel] = waarde
-
-ip = subprocess.run(["hostname", "-I"], capture_output=True, text=True).stdout.split()
-ip = ip[0] if ip else "<dit-ip>"
-
-try:
-    with urllib.request.urlopen(f"http://127.0.0.1:{API_PORT}/v3/paths/list", timeout=4) as antwoord:
-        items = json.load(antwoord)["items"]
-except Exception as fout:
-    raise SystemExit(f"Geen antwoord van de relay op poort {API_PORT} ({fout}). "
-                     "Draai: systemctl status srt-relay")
-
-if not items:
-    print("Geen streams: er publiceert nog niemand en er staan geen bronnen in de config.")
-else:
-    print(f"{'naam':16} {'online':7} {'bron':12} tracks")
-    for i in sorted(items, key=lambda x: x["name"]):
-        print(f"{i['name']:16} {'ja' if i['online'] else 'nee':7} "
-              f"{i.get('source', {}).get('type', '-'):12} {', '.join(i.get('tracks') or []) or '-'}")
-    print(f"\nKijken in de browser: http://{ip}:{WEBRTC_PORT}/<naam>/")
-    print(f"Kijken met VLC/OBS:   srt://{ip}:{SRT_PORT}?streamid=read:<naam>")
-PYEOF
-)
-
-write_tool srt-feed "$FEED_PY"
-write_tool srt-streams "$STREAMS_PY"
-
-stap "Zelftest"
-
-if ! dienst is-active --quiet "$SERVICE_NAME"; then sleep 3; fi
-if dienst is-active --quiet "$SERVICE_NAME"; then
-    TEST="/tmp/srt-zelftest-$$"
-    mkdir -p "$TEST"
-    ffmpeg -hide_banner -loglevel error -re -t 8 \
-        -f lavfi -i "testsrc2=size=640x360:rate=25" \
-        -f lavfi -i "sine=frequency=440" \
-        -c:v libx264 -preset ultrafast -tune zerolatency -c:a aac -shortest \
-        -f mpegts "srt://127.0.0.1:$SRT_PORT?streamid=publish:zelftest:$PUB_USER:$WACHTWOORD" \
-        >"$TEST/push.log" 2>&1 &
-    PUSH=$!
-    sleep 6
-    ffmpeg -hide_banner -loglevel error -i "srt://127.0.0.1:$SRT_PORT?streamid=read:zelftest" \
-        -t 3 -c copy -y "$TEST/terug.ts" >"$TEST/pull.log" 2>&1
-    kill "$PUSH" 2>/dev/null
-    sleep 1
-    if [ -s "$TEST/terug.ts" ] && ffmpeg -hide_banner -v error -i "$TEST/terug.ts" -frames:v 10 -f null - 2>/dev/null; then
-        ok "publiceren via SRT en terugkijken werkt (10 videoframes gelezen)"
-        printf 'ZELFTEST OK\n'
-    else
-        fout "zelftest mislukt: geen beeld terug via SRT"
-        tail -n 3 "$TEST/push.log" "$TEST/pull.log" 2>/dev/null
-        printf 'ZELFTEST MISLUKT\n'
-    fi
-    rm -rf "$TEST"
-else
-    fout "de dienst $SERVICE_NAME draait niet, dus geen zelftest"
-    dienst status "$SERVICE_NAME" --no-pager 2>&1 | tail -n 8
-    printf 'ZELFTEST MISLUKT\n'
+cat >/usr/local/bin/srt-feed <<EOF
+#!/usr/bin/env bash
+# Een bron naar de relay duwen:  srt-feed <naam> <url of bestand>
+set -uo pipefail
+NAAM="\${1:-}"; BRON="\${2:-}"
+if [ -z "\$NAAM" ] || [ -z "\$BRON" ]; then
+    echo "gebruik: srt-feed <naam> <bron-url of bestand>" >&2; exit 2
 fi
+WW="\$(sed -n 's/^PUB_PASS=//p' $ETC/relay.env | head -1)"
+exec ffmpeg -hide_banner -loglevel warning -re -i "\$BRON" \\
+    -map 0:v -map 0:a? -c copy -f mpegts \\
+    "srt://127.0.0.1:$SRT_PORT?streamid=publish:\$NAAM:$PUB_USER:\$WW"
+EOF
+chmod +x /usr/local/bin/srt-feed
+ok "srt-feed (een bron naar de relay duwen)"
 
-stap "Klaar in de container"
+# ---------------------------------------------------------------- zelftest relay
 
-IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-printf 'WACHTWOORD %s\n' "$WACHTWOORD"
-printf 'SRT-RELAY-GUEST-KLAAR ip=%s poort=%s wachtwoord=%s\n' "${IP:-?}" "$SRT_PORT" "$WACHTWOORD"
+stap "Zelftest: uitzenden en terugkijken over het relay"
 
-if [ "$FOUTEN" -gt 0 ]; then
-    printf '\n%s controle(s) met een fout.\n' "$FOUTEN"
+api() { curl -fsS --max-time 5 "http://127.0.0.1:$HTTP_PORT$1" 2>/dev/null; }
+
+# Een korte testbron (beeld + toon) naar de relay duwen en daarna terugkijken.
+ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc=size=640x360:rate=25" \
+    -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
+    -t 14 -c:v libx264 -preset veryfast -g 50 -bf 0 -pix_fmt yuv420p -b:v 800k \
+    -c:a aac -b:a 96k -ac 2 \
+    -f mpegts "srt://127.0.0.1:$SRT_PORT?streamid=publish:zelftest:$PUB_USER:$PUB_PASS" \
+    >/tmp/zelftest-uit.log 2>&1 &
+UITZENDER=$!
+
+KENNIS=""
+for _ in $(seq 1 20); do
+    sleep 1
+    KENNIS="$(api /api/streams || true)"
+    case "$KENNIS" in *zelftest*) break ;; esac
+done
+
+if [ -z "$KENNIS" ] || ! printf '%s' "$KENNIS" | grep -q zelftest; then
+    fout "het relay ziet de uitzender niet (poort $SRT_PORT/udp)"
+    sed 's/^/       /' /tmp/zelftest-uit.log
+    kill "$UITZENDER" 2>/dev/null
     exit 1
 fi
+ok "het relay ziet de uitzending 'zelftest'"
+
+SPOREN="$(printf '%s' "$KENNIS" | python3 -c '
+import json, sys
+gegevens = json.load(sys.stdin)
+for s in gegevens.get("streams", []):
+    if s.get("naam") == "zelftest":
+        print(s.get("sporen_aantal", 0), ",".join(s.get("sporen") or []))
+' 2>/dev/null)"
+AANTAL="${SPOREN%% *}"
+if [ "${AANTAL:-0}" -ge 2 ]; then ok "sporen in de uitzending: $AANTAL (${SPOREN#* })"
+else fout "het relay telt ${AANTAL:-0} sporen; verwacht minstens beeld + geluid"; fi
+
+# Terugkijken via de relay: dit is de kern — er moet een echte stream uitkomen.
+if ffmpeg -hide_banner -loglevel error -i \
+        "srt://127.0.0.1:$SRT_PORT?streamid=read:zelftest" \
+        -frames:v 30 -f null - >/tmp/zelftest-terug.log 2>&1; then
+    ok "terugkijken over SRT leverde 30 decodeerbare beelden"
+else
+    fout "terugkijken over SRT mislukte"
+    sed 's/^/       /' /tmp/zelftest-terug.log | head -8
+fi
+
+# HLS: de hub knipt de uitzending zelf in segmenten van twee seconden.
+SEGMENTEN=0
+for _ in $(seq 1 20); do
+    SEGMENTEN="$(ls "$HLS/zelftest"/seg*.ts 2>/dev/null | wc -l)"
+    [ "$SEGMENTEN" -ge 2 ] && break
+    sleep 1
+done
+if [ "$SEGMENTEN" -ge 2 ]; then ok "eigen HLS: $SEGMENTEN segmenten in $HLS/zelftest"
+else fout "geen HLS-segmenten gemaakt (gevonden: $SEGMENTEN)"; fi
+
+if api /hls/zelftest/index.m3u8 | grep -q "#EXTINF"; then
+    ok "afspeellijst met segmenten (http://<ip>:$HTTP_PORT/hls/zelftest/index.m3u8)"
+else
+    fout "de afspeellijst is leeg of niet bereikbaar"
+fi
+
+# Momentopname: het bord gebruikt die als voorbeeldbeeld.
+BEELD="/tmp/zelftest-beeld.jpg"
+if curl -fsS --max-time 20 -o "$BEELD" "http://127.0.0.1:$HTTP_PORT/beeld/zelftest.jpg" \
+        && [ "$(head -c2 "$BEELD" | od -An -tx1 | tr -d ' \n')" = "ffd8" ] \
+        && [ "$(wc -c <"$BEELD")" -gt 4000 ]; then
+    ok "momentopname is een echte jpeg ($(wc -c <"$BEELD") bytes)"
+else
+    fout "de momentopname is geen geldige jpeg"
+fi
+
+# Live beeld voor browsers en telefoons (beeldstroom).
+if timeout 12 curl -s -o /tmp/zelftest-stroom.bin \
+        "http://127.0.0.1:$HTTP_PORT/beeldstroom/zelftest"; then
+    RAMEN="$(grep -c -- "--raam" /tmp/zelftest-stroom.bin 2>/dev/null || echo 0)"
+    if [ "${RAMEN:-0}" -ge 2 ]; then ok "beeldstroom voor de telefoon: $RAMEN beelden"
+    else fout "de beeldstroom gaf $RAMEN beelden"; fi
+else
+    fout "de beeldstroom is niet bereikbaar"
+fi
+
+kill "$UITZENDER" 2>/dev/null
+wait "$UITZENDER" 2>/dev/null
+
+for _ in $(seq 1 10); do
+    api /api/streams | grep -q zelftest || break
+    sleep 1
+done
+if api /api/streams | grep -q zelftest; then
+    let_op "de uitzending 'zelftest' blijft in de lijst staan (de hub ruimt hem niet op)"
+else
+    ok "het relay ruimt een gestopte uitzending netjes op"
+fi
+
+# ---------------------------------------------------------------- zelftest bord
+
+stap "Zelftest: het uitzendbord bouwt en zendt uit"
+
+# Een bron voor het bord: een korte lus met beeld en twee geluidssporen.
+if ffmpeg -hide_banner -loglevel error -y \
+        -f lavfi -i "testsrc=size=640x360:rate=25" \
+        -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+        -f lavfi -i "sine=frequency=880:sample_rate=48000" \
+        -t 10 -c:v libx264 -preset veryfast -g 50 -bf 0 -pix_fmt yuv420p \
+        -c:a aac -b:a 96k -ac 2 -map 0:v -map 1:a -map 2:a \
+        -f mp4 "$MEDIA/zelftest-lus.mp4" >/tmp/lus.log 2>&1; then
+    ok "bron voor het bord gemaakt: zelftest-lus.mp4"
+else
+    fout "kon geen bron voor het bord maken"
+fi
+
+BORD="http://127.0.0.1:$BORD_POORT"
+
+bord_post() { curl -fsS --max-time 90 -u "$PUB_USER:$BORD_WW" \
+    -H "Content-Type: application/json" -X POST "$BORD$1" -d "${2:-{\}}"; }
+bord_get()  { curl -fsS --max-time 5 -u "$PUB_USER:$BORD_WW" "$BORD$1"; }
+
+if bord_get / >/dev/null 2>&1; then ok "het bord antwoordt op http://127.0.0.1:$BORD_POORT"
+else fout "het bord antwoordt niet — kijk in: journalctl -u srt-relay-bord -n 30"; fi
+
+if bord_post /api/instellingen '{"afspeellijst":["zelftest-lus.mp4"]}' >/dev/null 2>&1; then
+    ok "afspeellijst ingesteld op zelftest-lus.mp4"
+else
+    fout "kon de afspeellijst niet instellen"
+fi
+
+bord_post /api/bouw >/dev/null 2>&1 || fout "het bord begon niet te bouwen"
+GEBOUWD=0
+for _ in $(seq 1 60); do
+    sleep 2
+    STAAT="$(bord_get /api/staat 2>/dev/null || true)"
+    case "$STAAT" in *'"bezig": false'*) GEBOUWD=1; break ;; esac
+done
+if [ "$GEBOUWD" -eq 1 ]; then ok "de lus is gebouwd uit de afspeellijst"
+else fout "het bouwen van de lus kwam niet klaar"; fi
+
+bord_post /api/start >/dev/null 2>&1 || fout "het bord begon niet uit te zenden"
+ONLINE=0
+for _ in $(seq 1 30); do
+    sleep 2
+    STAAT="$(bord_get /api/staat 2>/dev/null || true)"
+    case "$STAAT" in *'"online": true'*) ONLINE=1; break ;; esac
+done
+if [ "$ONLINE" -eq 1 ]; then ok "het bord zendt uit en het relay ziet het"
+else fout "het bord zendt niet aantoonbaar uit"; fi
+
+if bord_post /api/stop >/dev/null 2>&1; then ok "uitzending weer gestopt"
+else let_op "stoppen gaf een melding"; fi
+
+# ---------------------------------------------------------------- samenvatting
+
+stap "Klaar"
+
+zeg "  WACHTWOORD $PUB_PASS"
+zeg "  BORD wachtwoord=$BORD_WW"
+zeg ""
+
+if [ "$FOUTEN" -gt 0 ]; then
+    zeg "  $FOUTEN controle(s) mislukt — zie [fout] hierboven."
+    exit 1
+fi
+
+echo "ZELFTEST OK"
+echo "ZELFTEST BORD OK"
 exit 0

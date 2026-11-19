@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uitzendbord — SRT-testbeeld</title>
+<style>
+  :root{
+    --bg:#f4f7fb; --kaart:#fff; --lijn:#e3eaf4; --tekst:#0f172a; --grijs:#5b6b83;
+    --accent:#2ea3f2; --diep:#1e73be; --goed:#1f9d55; --fout:#d6455b;
+    --grad:linear-gradient(90deg,#5ff0e8,#2ea3f2 55%,#1e73be);
+    --schaduw:0 1px 2px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tekst);
+       font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{background:var(--kaart);border-bottom:1px solid var(--lijn)}
+  .binnen{max-width:1400px;margin:0 auto;padding:14px 20px}
+  .kop{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .merk{width:44px;height:44px;border-radius:11px;background:var(--grad);flex:0 0 auto}
+  h1{font-size:19px;margin:0}
+  .onder{color:var(--grijs);font-size:13px;margin-top:2px}
+  .streep{height:3px;background:var(--grad);border-radius:3px}
+  .rond{display:inline-block;width:9px;height:9px;border-radius:50%;background:#c3cfdf;margin-right:6px}
+  .rond.aan{background:var(--goed);box-shadow:0 0 0 3px rgba(31,157,85,.16)}
+  .rond.bezig{background:var(--accent);animation:puls 1.1s infinite}
+  @keyframes puls{50%{opacity:.35}}
+  .vakken{display:grid;grid-template-columns:1.05fr 1.05fr 1.15fr;gap:16px;margin:16px 0}
+  @media(max-width:1080px){.vakken{grid-template-columns:1fr}}
+  .kaart{background:var(--kaart);border:1px solid var(--lijn);border-radius:14px;
+         box-shadow:var(--schaduw);padding:16px}
+  .kaart h2{font-size:14px;letter-spacing:.02em;text-transform:uppercase;color:var(--grijs);
+            margin:0 0 12px}
+  label{display:block;font-size:13px;color:var(--grijs);margin:10px 0 4px}
+  input[type=text],input[type=number],select{width:100%;padding:9px 10px;border:1px solid var(--lijn);
+        border-radius:9px;font-size:14px;background:#fbfdff;color:var(--tekst)}
+  input[type=text]:focus,select:focus,input[type=number]:focus{outline:2px solid var(--accent);
+        outline-offset:1px;border-color:var(--accent)}
+  .rij{display:flex;gap:10px}
+  .rij>div{flex:1;min-width:0}
+  .schakel{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:14px;color:var(--tekst)}
+  .schakel input{width:17px;height:17px;accent-color:var(--accent)}
+  button{border:0;border-radius:10px;padding:10px 14px;font-size:14px;font-weight:600;
+         cursor:pointer;background:#eef4fb;color:var(--diep)}
+  button:hover{background:#e2edf9}
+  button.hoofd{background:var(--accent);color:#fff}
+  button.hoofd:hover{background:#1e8fdc}
+  button.stop{background:#fdeef1;color:var(--fout)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .knoppen{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+  ul.lijst{list-style:none;margin:0;padding:0;max-height:290px;overflow:auto}
+  ul.lijst li{display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--lijn);
+        border-radius:10px;margin-bottom:7px;background:#fbfdff}
+  ul.lijst li .naam{flex:1;min-width:0}
+  ul.lijst li .naam b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+        white-space:nowrap}
+  ul.lijst li .meta{font-size:12px;color:var(--grijs)}
+  .mini{padding:5px 9px;font-size:13px;border-radius:8px;background:#eef4fb;font-weight:600}
+  .mini.rood{background:#fdeef1;color:var(--fout)}
+  .drop{border:2px dashed var(--lijn);border-radius:12px;padding:18px;text-align:center;
+        color:var(--grijs);font-size:13px;background:#fbfdff;cursor:pointer}
+  .drop.over{border-color:var(--accent);background:#eef7fe;color:var(--diep)}
+  .balk{height:9px;background:#e9f0f8;border-radius:6px;overflow:hidden;margin:8px 0}
+  .balk i{display:block;height:100%;width:0;background:var(--grad);transition:width .4s}
+  pre.log{background:#0f172a;color:#d8e4f2;border-radius:11px;padding:12px;height:210px;
+        overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;margin:0;
+        white-space:pre-wrap;overflow-wrap:anywhere}
+  .links{display:flex;gap:22px;flex-wrap:wrap;margin-top:10px}
+  .links a{color:var(--diep);text-decoration:none}
+  .links a:hover{text-decoration:underline}
+  .kop-links{font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--grijs)}
+  code{background:#eef4fb;border-radius:6px;padding:2px 6px;font-size:13px}
+  .pil{display:inline-block;background:#eef4fb;color:var(--diep);border-radius:999px;
+       padding:3px 9px;font-size:12px;font-weight:600;margin-left:6px}
+  .fout{background:#fdeef1;color:#8d2334;border-radius:10px;padding:10px 12px;font-size:13px;
+        margin-top:10px;display:none}
+  .voet{color:var(--grijs);font-size:12px;padding:8px 0 26px;text-align:center}
+  iframe{width:100%;aspect-ratio:16/9;border:1px solid var(--lijn);border-radius:12px;background:#000}
+</style>
+</head>
+<body>
+<header>
+  <div class="binnen">
+    <div class="kop">
+      <div class="merk"></div>
+      <div>
+        <h1>Uitzendbord — SRT-testbeeld</h1>
+        <div class="onder">Werdens Media · kies bestanden, zet de opmaak, zend uit naar de relay</div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:16px;align-items:center;font-size:13px">
+        <span><span id="lampUit" class="rond"></span><span id="tekstUit">uitzending uit</span></span>
+        <span><span id="lampBouw" class="rond"></span><span id="tekstBouw">niets aan het bouwen</span></span>
+        <span id="klok" style="color:var(--grijs)"></span>
+      </div>
+    </div>
+  </div>
+  <div class="streep"></div>
+</header>
+
+<div class="binnen">
+  <div class="vakken">
+    <!-- bibliotheek -->
+    <section class="kaart">
+      <h2>1 · Bibliotheek</h2>
+      <div class="drop" id="drop">
+        <b>Sleep mediabestanden hierheen</b><br>of klik om te kiezen (mp4, mov, mkv, ts, …)
+        <input type="file" id="bestand" multiple hidden>
+      </div>
+      <div class="rij" style="margin-top:12px">
+        <div><label for="zoek">Zoeken</label><input type="text" id="zoek" placeholder="deel van de naam"></div>
+      </div>
+      <ul class="lijst" id="bibliotheek" style="margin-top:12px"></ul>
+      <div class="meta" id="bibMeta" style="color:var(--grijs);font-size:12px"></div>
+    </section>
+
+    <!-- afspeellijst -->
+    <section class="kaart">
+      <h2>2 · Afspeellijst <span class="pil" id="pilLengte">0 s</span></h2>
+      <ul class="lijst" id="lijst"></ul>
+      <div class="schakel"><input type="checkbox" id="lus" checked disabled>
+        <label for="lus" style="margin:0">Eindeloos herhalen (publiek draait altijd door)</label></div>
+      <div class="meta" style="color:var(--grijs);font-size:12px">
+        De gekozen bestanden spelen in deze volgorde. Is de bron kleiner of groter dan het
+        gekozen formaat, dan past het bord hem passend in met zwarte randen.
+      </div>
+      <div class="links">
+        <div><div class="kop-links">Kanaaltonen</div><div id="toonUitleg">—</div></div>
+      </div>
+    </section>
+
+    <!-- instellingen -->
+    <section class="kaart">
+      <h2>3 · Opmaak en formaat</h2>
+      <label for="titel">Tekst in de bovenbalk</label>
+      <input type="text" id="titel">
+      <label for="crawl">Crawl onderin</label>
+      <input type="text" id="crawl">
+      <div class="rij">
+        <div><label for="formaat">Formaat</label><select id="formaat"></select></div>
+        <div><label for="fps">Beelden per seconde</label>
+          <select id="fps"><option value="25">25</option><option value="50">50</option></select></div>
+      </div>
+      <div class="rij">
+        <div><label for="scan">Scan</label>
+          <select id="scan">
+            <option value="p">Progressief (p)</option>
+            <option value="i">Interlaced (i)</option>
+          </select></div>
+        <div><label for="bitrate">Bitrate</label><input type="text" id="bitrate"></div>
+      </div>
+      <div class="rij">
+        <div><label for="preset">Preset (snelheid)</label><select id="preset"></select></div>
+        <div><label for="kanalen">Audiokanalen</label>
+          <select id="kanalen">
+            <option value="2">2 (1 stereospoor)</option>
+            <option value="4">4 (2 stereosporen)</option>
+            <option value="8">8 (4 stereosporen)</option>
+          </select></div>
+      </div>
+      <div class="rij">
+        <div><label for="slot">Seconde per kanaal</label><input type="number" id="slot" min="1" max="30" step="0.5"></div>
+        <div><label for="streamnaam">Streamnaam</label><input type="text" id="streamnaam"></div>
+      </div>
+      <div class="schakel"><input type="checkbox" id="logo"><label for="logo" style="margin:0">Logo laten stuiteren</label></div>
+      <div class="schakel">
+        <select id="tijdcode" style="margin:0">
+          <option value="serverklok">klok van de server (aanbevolen)</option>
+          <option value="uitzending">meelopen met de uitzending</option>
+          <option value="uit">geen tijdcode</option>
+        </select>
+        <label for="tijdcode" style="margin:0">Tijdcode in de bovenbalk</label>
+      </div>
+      <div class="schakel"><input type="checkbox" id="kanaalvak"><label for="kanaalvak" style="margin:0">Kanaalvak rechtsboven</label></div>
+      <div class="knoppen">
+        <button class="hoofd" id="knBouw">Bouwen</button>
+        <button class="hoofd" id="knStart">Bouwen en uitzenden</button>
+        <button class="stop" id="knStop" disabled>Stoppen</button>
+      </div>
+      <div class="fout" id="foutvak"></div>
+    </section>
+  </div>
+
+  <!-- onderbalk -->
+  <section class="kaart">
+    <h2>4 · Beeld, voortgang en log</h2>
+    <div class="rij">
+      <div style="flex:1.2">
+        <div class="balk"><i id="vul"></i></div>
+        <div class="meta" id="voortgang" style="color:var(--grijs);font-size:12px">klaar om te bouwen</div>
+        <pre class="log" id="log">log verschijnt hier…</pre>
+      </div>
+      <div style="flex:1">
+        <div id="geenbeeld" class="drop" style="padding:40px 18px">
+          Nog geen uitzending. Zet een stream op en het beeld verschijnt hier.
+        </div>
+        <img id="beeld" style="display:none;max-width:100%;height:auto;border-radius:10px" alt="voorbeeld uit de uitzending">
+        <div class="links" id="adressen"></div>
+      </div>
+    </div>
+  </section>
+  <div class="voet">Alles lokaal op je eigen netwerk · gebouwd met ffmpeg en de standaardbibliotheek van Python</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let staat = null, logNr = 0, laatsteLijst = null;
+
+function seconde(n){ n = Math.round(n||0); const m = Math.floor(n/60); return (m? m+"m ":"") + (n%60) + "s"; }
+function mb(n){ return (n/1048576).toFixed(n > 10485760 ? 0 : 1) + " MB"; }
+function zeg(tekst, fout){ const v = $("#foutvak"); v.textContent = tekst; v.style.display = fout===undefined?"none":"block"; }
+async function api(pad, opties){ const a = await fetch(pad, opties); const d = await a.json().catch(()=>({}));
+  if(!a.ok) throw new Error(d.fout || ("fout "+a.status)); return d; }
+const post = (pad, lichaam) => api(pad, {method:"POST", headers:{"Content-Type":"application/json"},
+  body: JSON.stringify(lichaam||{})});
+
+/* ---- bibliotheek ---- */
+function tekenBibliotheek(lijst){
+  laatsteLijst = lijst;
+  const zoek = $("#zoek").value.toLowerCase();
+  const zichtbaar = lijst.filter(b => b.naam.toLowerCase().includes(zoek));
+  const ul = $("#bibliotheek"); ul.innerHTML = "";
+  if(!zichtbaar.length){ ul.innerHTML = '<li><span class="meta">Nog geen bestanden in de bibliotheek.</span></li>'; }
+  zichtbaar.forEach(b => {
+    const li = document.createElement("li");
+    const meta = b.fout ? "niet te lezen" :
+      `${b.breedte}x${b.hoogte} · ${b.fps} fps · ${seconde(b.duur)} · ${mb(b.bytes)}` +
+      (b.geluid ? "" : " · geen geluidsspoor");
+    li.innerHTML = `<span class="naam"><b>${b.naam}</b><span class="meta">${meta}</span></span>`;
+    const kn = document.createElement("button");
+    kn.className = "mini"; kn.textContent = "+ lijst";
+    kn.onclick = async () => {
+      const nieuw = [...staat.instellingen.afspeellijst, b.naam];
+      try{ await post("/api/instellingen", {afspeellijst: nieuw}); }catch(e){ zeg(e.message, true); }
+    };
+    const weg = document.createElement("button");
+    weg.className = "mini rood"; weg.textContent = "✕";
+    weg.onclick = async () => { try{ await post("/api/verwijder", {naam: b.naam}); }catch(e){ zeg(e.message, true); } };
+    li.append(kn, weg);
+    ul.append(li);
+  });
+  $("#bibMeta").textContent = `${lijst.length} bestand(en) in ${staat ? staat.media_dir : ""}`;
+}
+
+function tekenLijst(instellingen, lijst){
+  const ul = $("#lijst"); ul.innerHTML = "";
+  if(!instellingen.afspeellijst.length){
+    ul.innerHTML = '<li><span class="meta">Nog niets gekozen — klik op “+ lijst” bij een bestand.</span></li>';
+  }
+  let totaal = 0;
+  instellingen.afspeellijst.forEach((naam, i) => {
+    const b = (lijst||[]).find(x => x.naam === naam) || {};
+    totaal += b.duur || 0;
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="naam"><b>${i+1}. ${naam}</b>
+      <span class="meta">${b.breedte ? b.breedte+"x"+b.hoogte+" · " : ""}${seconde(b.duur)}</span></span>`;
+    const maak = (tekst, fn, rood) => { const k = document.createElement("button");
+      k.className = "mini" + (rood ? " rood" : ""); k.textContent = tekst; k.onclick = fn; return k; };
+    li.append(
+      maak("↑", () => verzet(i, i-1)),
+      maak("↓", () => verzet(i, i+1)),
+      maak("✕", () => { const n = [...instellingen.afspeellijst]; n.splice(i,1); zet({afspeellijst:n}); }, true));
+    ul.append(li);
+  });
+  $("#pilLengte").textContent = seconde(totaal);
+  $("#toonUitleg").textContent = `kanaal 1 t/m ${instellingen.kanalen}, elk ${instellingen.slot} s`;
+  $("#knStart").disabled = !instellingen.afspeellijst.length;
+}
+async function verzet(van, naar){
+  const n = [...staat.instellingen.afspeellijst];
+  if(naar < 0 || naar >= n.length) return;
+  [n[van], n[naar]] = [n[naar], n[van]];
+  await zet({afspeellijst:n});
+}
+async function zet(velden){ try{ await post("/api/instellingen", velden); }catch(e){ zeg(e.message, true); } }
+
+/* ---- uploaden ---- */
+async function upload(bestanden){
+  for(const f of bestanden){
+    await new Promise((klaar, mis) => {
+      const x = new XMLHttpRequest();
+      x.open("POST", "/api/upload?naam=" + encodeURIComponent(f.name));
+      x.upload.onprogress = e => {
+        $("#voortgang").textContent = `uploaden ${f.name}: ${Math.round(100*e.loaded/e.total)}%`;
+        $("#vul").style.width = Math.round(100*e.loaded/e.total) + "%";
+      };
+      x.onload = () => x.status < 300 ? klaar() : mis(new Error("upload mislukte ("+x.status+")"));
+      x.onerror = () => mis(new Error("upload mislukte"));
+      x.setRequestHeader("Content-Type", "application/octet-stream");
+      x.send(f);
+    }).catch(e => zeg(e.message, true));
+  }
+  $("#voortgang").textContent = "upload klaar";
+  $("#vul").style.width = "0";
+}
+
+/* ---- log ---- */
+async function haalLog(){
+  try{
+    const d = await api("/api/log?vanaf=" + logNr);
+    if(d.regels && d.regels.length){
+      const pre = $("#log");
+      if(!logNr) pre.textContent = "";
+      d.regels.forEach(r => { pre.textContent += `\n${r.tijd}  ${r.regel}`; });
+      pre.scrollTop = pre.scrollHeight;
+      logNr = d.nummer;
+    }
+  }catch(e){}
+}
+
+/* ---- hoofdtekening ---- */
+function tekenStaat(s){
+  staat = s;
+  const i = s.instellingen;
+  const veld = (id, waarde) => { const e = $(id); if(document.activeElement !== e) e.value = waarde; };
+  veld("#titel", i.titel); veld("#crawl", i.crawl); veld("#bitrate", i.bitrate);
+  veld("#streamnaam", i.streamnaam); veld("#slot", i.slot);
+  $("#fps").value = String(i.fps);
+  $("#scan").value = i.interlaced ? "i" : "p";
+  $("#kanalen").value = String(i.kanalen);
+  $("#preset").value = i.preset;
+  if(!$("#formaat").options.length)
+    $("#formaat").innerHTML = s.formaten.map(f => `<option value="${f.id}">${f.naam}</option>`).join("");
+  if(!$("#preset").options.length)
+    $("#preset").innerHTML = s.presets.map(p => `<option>${p}</option>`).join("");
+  $("#formaat").value = i.formaat; $("#preset").value = i.preset;
+  $("#logo").checked = !!i.logo;
+  // oudere instellingen bewaarden een ja/nee; die staan voor de teller
+  $("#tijdcode").value = (i.tijdcode === true) ? "uitzending"
+    : (i.tijdcode === false || i.tijdcode === null) ? "uit" : i.tijdcode;
+  $("#kanaalvak").checked = !!i.kanaalvak;
+
+  tekenBibliotheek(laatsteLijst || []);
+  tekenLijst(i, laatsteLijst || []);
+
+  const bezig = s.render.bezig;
+  $("#knBouw").disabled = bezig;
+  $("#knStart").disabled = bezig || !i.afspeellijst.length;
+  $("#knStop").disabled = !s.uitzending.actief;
+  $("#lampBouw").className = "rond" + (bezig ? " bezig" : "");
+  $("#tekstBouw").textContent = bezig ? `bouwen ${s.render.voortgang}%`
+    : (s.render.fout ? "bouw mislukt" : (s.render.klaar ? "lusbestand klaar" : "niets aan het bouwen"));
+  $("#vul").style.width = (bezig || s.render.voortgang ? s.render.voortgang : 0) + "%";
+  if(bezig || s.render.klaar)
+    $("#voortgang").textContent = `${s.render.voortgang}% van ${seconde(s.render.duur)}` +
+      (s.lusbestand ? ` · lusbestand ${mb(s.lusbestand.bytes)} van ${new Date(s.lusbestand.gewijzigd*1000).toLocaleTimeString()}` : "");
+  const relay0 = s.relay || {};
+  $("#lampUit").className = "rond" + ((s.uitzending.actief || relay0.online) ? " aan" : "");
+  const inLucht = s.uitzending.actief || (relay0 && relay0.online);
+  const naam = s.naam || s.uitzending.naam || "";
+  $("#tekstUit").textContent = s.uitzending.actief
+    ? `in de lucht als “${naam}”`
+    : (relay0 && relay0.online
+        ? `“${naam}” is in de lucht (niet via dit bord gestart)`
+        : "uitzending uit");
+  if(s.render.fout) zeg("Bouwen mislukte: " + s.render.fout, true);
+
+  const relay = s.relay || {};
+  const adressen = s.adressen;
+  $("#adressen").innerHTML = [
+    `<div><div class="kop-links">In VLC (netwerkstream openen)</div>
+       <div><code>${adressen.ts}</code></div></div>`,
+    `<div><div class="kop-links">In de browser / telefoon</div>
+       <div><a href="${adressen.hls}" target="_blank">${adressen.hls}</a></div></div>`,
+    `<div><div class="kop-links">In een SRT-speler</div>
+       <div><code>${adressen.srt}</code></div></div>`,
+    `<div><div class="kop-links">Relay</div><div>${relay.bekend
+        ? (relay.online ? `<span class="rond aan"></span>online · ${relay.sporen} sporen · ${relay.kijkers} kijkers`
+                        : `<span class="rond"></span>niet online`)
+        : "API niet bereikbaar"}</div></div>`
+  ].join("");
+  if(s.uitzending.actief || relay0.online){
+    $("#geenbeeld").style.display = "none";
+    const fr = $("#beeld");
+    fr.dataset.naam = s.uitzending.naam;
+    fr.style.display = "block";
+    // momentopname elke seconde verversen; de tijd erachter omzeilt de cache
+    if(!fr.dataset.laatst || Date.now() - fr.dataset.laatst > 2000){
+      fr.dataset.laatst = Date.now();
+      fr.src = s.adressen.voorbeeld + "?t=" + fr.dataset.laatst;
+    }
+  }else{
+    $("#beeld").style.display = "none"; $("#beeld").removeAttribute("src");
+    $("#beeld").dataset.naam = ""; $("#geenbeeld").style.display = "block";
+  }
+}
+
+/* ---- velden ---- */
+function koppel(){
+  const zend = () => zet({titel:$("#titel").value, crawl:$("#crawl").value,
+    bitrate:$("#bitrate").value, streamnaam:$("#streamnaam").value, slot:parseFloat($("#slot").value)||3});
+  ["#titel","#crawl","#bitrate","#streamnaam"].forEach(s => $(s).addEventListener("change", zend));
+  $("#slot").addEventListener("change", zend);
+  $("#formaat").addEventListener("change", e => zet({formaat:e.target.value}));
+  $("#fps").addEventListener("change", e => zet({fps:parseInt(e.target.value)}));
+  $("#scan").addEventListener("change", e => zet({interlaced:e.target.value === "i"}));
+  $("#kanalen").addEventListener("change", e => zet({kanalen:parseInt(e.target.value)}));
+  $("#preset").addEventListener("change", e => zet({preset:e.target.value}));
+  $("#logo").addEventListener("change", e => zet({logo:e.target.checked}));
+  $("#tijdcode").addEventListener("change", e => zet({tijdcode:e.target.value}));
+  $("#kanaalvak").addEventListener("change", e => zet({kanaalvak:e.target.checked}));
+  $("#zoek").addEventListener("input", () => tekenBibliotheek(laatsteLijst || []));
+  $("#knBouw").onclick = async () => { zeg(""); try{ await post("/api/bouw"); }catch(e){ zeg(e.message, true); } };
+  $("#knStart").onclick = async () => { zeg("");
+    try{ await post("/api/bouw"); await post("/api/start"); }catch(e){ zeg(e.message, true); } };
+  $("#knStop").onclick = async () => { try{ await post("/api/stop"); }catch(e){ zeg(e.message, true); } };
+  const drop = $("#drop"), kiezer = $("#bestand");
+  drop.onclick = () => kiezer.click();
+  kiezer.onchange = () => { upload([...kiezer.files]); kiezer.value = ""; };
+  ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => upload([...e.dataTransfer.files]));
+}
+
+async function rond(){
+  try{
+    const s = await api("/api/staat");
+    if(!laatsteLijst || !$("#bibliotheek").children.length){
+      const b = await api("/api/bestanden"); laatsteLijst = b.bestanden;
+    }
+    tekenStaat(s);
+    $("#klok").textContent = new Date().toLocaleTimeString();
+  }catch(e){ $("#tekstBouw").textContent = "bord niet bereikbaar"; }
+}
+
+koppel();
+(async function(){
+  const b = await api("/api/bestanden").catch(() => ({bestanden:[]}));
+  laatsteLijst = b.bestanden;
+  rond();
+  haalLog();
+  setInterval(rond, 1500);
+  setInterval(haalLog, 1200);
+  setInterval(async () => {
+    const b = await api("/api/bestanden").catch(() => null);
+    if(b) laatsteLijst = b.bestanden;
+  }, 8000);
+})();
+</script>
+</body>
+</html>

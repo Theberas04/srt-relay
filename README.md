@@ -1,163 +1,172 @@
-# SRT-relay via Proxmox
+# SRT-relay / livestream-hub
 
-Zet in één commando een **SRT-relay / livestream-hub** neer in een eigen
-Proxmox-container: alles wat op je netwerk een stream maakt (OBS, ffmpeg, een
-camera, een telefoon) kan er naartoe duwen, en alles wat kan kijken (VLC, OBS,
-browser, encoder) kan er weer vanaf halen.
+Eén relay in je eigen netwerk waar elke feed naartoe kan uitzenden en waar alles
+vanaf kan kijken — via SRT, RTMP, HLS of gewoon in de browser en op de telefoon.
+Daarnaast een **uitzendbord**: een webpagina waarmee je bestanden kiest, een titel
+en crawl klaarzet, het formaat en de tijdcode instelt en de uitzending start.
 
-    srt://<container-ip>:8890?streamid=publish:mijnstream
-    srt://<container-ip>:8890?streamid=read:mijnstream
-    http://<container-ip>:8889/mijnstream/      (kijken in de browser)
+De relay is **eigen code**, geen kant-en-klare streamserver: de SRT-koppeling, het
+ontleden van de MPEG-TS-stroom, het knippen in HLS-segmenten, de HLS-, TS- en
+kijkroutes en de API staan allemaal in `hub/`. ffmpeg doet het rekenwerk (beeld en
+geluid) en libsrt is de protocolbibliotheek — verder niets.
 
-![Speler in de browser, live via de relay](docs/img/speler.png)
+![het uitzendbord](docs/img/uitzendbord.png)
 
-## Installeren
+## Installeren (Proxmox)
 
-Op de **Proxmox-host**, als root:
+Draai dit op je Proxmox-host als root. Het script maakt een Debian-container,
+installeert de relay erin en **toetst hem ter plaatse** (uitzenden, terugkijken,
+segmenten, momentopname, bord):
 
-    bash <(curl -fsSL https://raw.githubusercontent.com/Theberas04/srt-relay/main/srt-relay.sh)
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Theberas04/srt-relay/main/srt-relay.sh)
+```
 
-Het script vraagt niets, maakt een Debian-container, installeert ffmpeg en
-[MediaMTX](https://github.com/bluenviron/mediamtx), zet er een systemd-dienst
-in, test of publiceren én terugkijken via SRT echt werkt, en print daarna de
-klaar-om-te-gebruiken URL's met een zelfgegenereerd wachtwoord.
+Aan het eind krijg je de adressen, de poorten en het publiceerwachtwoord. Zonder
+Proxmox kan het ook: zet de bestanden uit deze repo in een container of machine en
+draai `bash guest-setup.sh` als root.
 
-Klaar? Dan zie je zoiets:
+Instellingen (als omgevingsvariabele vóór het commando):
 
-    == Klaar
-      Relay:            192.168.1.50  (container 130, srt-relay)
-      SRT-poort:        8890/udp
-      Publiceren:       srt://192.168.1.50:8890?streamid=publish:mijnstream:tom:8f2c...
-      Kijken:           srt://192.168.1.50:8890?streamid=read:mijnstream
-      Browser:          http://192.168.1.50:8889/mijnstream/
-
-Opruimen: `pct destroy 130`.
-
-## Wat je krijgt
-
-| Poort | Protocol | Waarvoor |
+| Variabele | Standaard | Wat het doet |
 |---|---|---|
-| 8890 | UDP (SRT) | het relay zelf — publiceren én kijken |
-| 8554 | TCP (RTSP) | camera's, VLC |
-| 1935 | TCP (RTMP) | OBS |
-| 8888 | TCP (HTTP) | kijken als HLS in de browser |
-| 8889 | TCP (HTTP) | kijken als WebRTC in de browser (laagste vertraging) |
-| 9997 | TCP | status-API, alleen vanaf de container zelf |
+| `CTID` | eerste vrije 130-199 | container-ID |
+| `CTNAME` | `srt-relay` | hostnaam van de container |
+| `SRT_PORT` | `8890` | UDP-poort voor SRT (uitzenden én kijken) |
+| `HTTP_PORT` | `8080` | HTTP-poort: HLS, live TS, kijkpagina, momentopname, API |
+| `RTMP_PORT` | `1935` | RTMP-poort (voor OBS) |
+| `BORD_POORT` | `8095` | poort van het uitzendbord |
+| `CORES` `RAM` `DISK` | `1` `512` `3` | afmetingen van de container |
+| `DEBIAN` | `13` | gastversie |
+| `FETCH_ONLY=1` | | alleen controleren of alle bestanden er zijn |
 
-## Publiceren
+## Uitzenden
 
-**OBS** — Instellingen → Uitgang → Aangepaste stream:
+Vervang `192.168.1.50` door het adres dat de installer je gaf, en `<wachtwoord>`
+door het publiceerwachtwoord.
 
-    Server:  rtmp://192.168.1.50:1935
-    Sleutel: mijnstream?user=tom&pass=<wachtwoord>
+```bash
+# ffmpeg: een bestand naar de relay
+ffmpeg -re -i film.mp4 -map 0:v -map 0:a -c copy -f mpegts \
+  "srt://192.168.1.50:8890?streamid=publish:mijnstream:tom:<wachtwoord>"
 
-of als SRT-uitgang:
+# vanaf de machine met de relay zelf (de bron mag ook een camera-URL zijn)
+srt-feed mijnstream /pad/film.mp4
+```
 
-    srt://192.168.1.50:8890?streamid=publish:mijnstream:tom:<wachtwoord>
-
-**ffmpeg:**
-
-    ffmpeg -re -i input.mp4 -c copy -f mpegts \
-      "srt://192.168.1.50:8890?streamid=publish:mijnstream:tom:<wachtwoord>"
-
-**Telefoon** (Larix Broadcaster, SRT Stream):
-
-    srt://192.168.1.50:8890?streamid=publish:telefoon:tom:<wachtwoord>
-
-De naam in de streamid (`mijnstream`) is de naam waaronder de stream te zien
-is. Publiceren kan alleen met het wachtwoord; kijken mag iedereen met de link.
-Wil je kijken ook achter een wachtwoord, zet dan de `read`-regel in
-`/opt/srt-relay/mediamtx.yml` onder de gebruiker in plaats van onder `any`.
+- **OBS**: server `rtmp://192.168.1.50:1935/live`, sleutel
+  `mijnstream?user=tom&pass=<wachtwoord>` (inloggegevens horen in de sleutel, niet
+  als `user:pass@` in de server-URL — dat negeert ffmpeg's RTMP).
+- **Telefoon**: een SRT-app met dezelfde URL; de naam `mijnstream` kies je zelf.
+- Geef je meerdere audiosporen mee, doe dat dan met `-map 0:v -map 0:a`; zonder
+  `-map` schrijft ffmpeg stil één videospoor en één audiospoor weg.
 
 ## Kijken
 
-    srt://192.168.1.50:8890?streamid=read:mijnstream      # VLC, OBS, ffmpeg
-    http://192.168.1.50:8889/mijnstream/                  # WebRTC in de browser
-    http://192.168.1.50:8888/mijnstream/                  # HLS in de browser
-
-## Bronnen op je netwerk binnenhalen
-
-Iets dat kan *duwen* (OBS, telefoon) heeft niets nodig. Een bron die alleen
-*uitlevert* (camera, bestaande stream) laat je de relay ophalen:
-
-    pct exec <id> -- srt-feed voordeur rtsp://192.168.1.60:554/Streaming/Channels/101
-    pct exec <id> -- srt-feed desktop  rtsp://192.168.1.61:8554/desktop --on-demand
-    pct exec <id> -- srt-streams                 # wat staat er online
-    pct exec <id> -- srt-feed --verwijder voordeur
-
-`--on-demand` verbindt pas als er iemand kijkt (spaart bandbreedte). De relay
-herlaadt zijn config automatisch, dus herstarten is nooit nodig.
-
-## Van buitenaf bereikbaar
-
-1. Zet in je router **UDP 8890** door naar het container-IP.
-2. Geef je WAN-IP een naam (eigen domein of Dynamic DNS).
-3. Gebruik dan `srt://<jouw-domein>:8890?streamid=read:mijnstream`.
-
-Let op: zit je provider achter CGNAT (WAN-IP begint met 100.64–100.127 of je
-router laat een ander adres zien dan je publieke IP), dan is een port forward
-niet genoeg — dan is een VPN zoals Tailscale of een relay op een VPS de weg.
-Controleer het met `ffprobe "srt://<wan-ip>:8890?streamid=read:mijnstream"` op
-een telefoon met mobiel internet.
-
-## Opties
-
-Als omgevingsvariabele mee te geven aan de one-liner, bijvoorbeeld:
-
-    CTID=140 SRT_PORT=9000 DISK=5 bash <(curl -fsSL .../srt-relay.sh)
-
-| Variabele | Standaard | Betekenis |
+| Manier | Adres | Waar |
 |---|---|---|
-| `CTID` | eerste vrije vanaf 130 | container-ID |
-| `CTNAME` | `srt-relay` | hostnaam |
-| `SRT_PORT` | `8890` | UDP-poort van het relay |
-| `RTMP_PORT` | `1935` | RTMP-poort (OBS) |
-| `HLS_PORT` | `8888` | HTTP-poort voor HLS |
-| `WEBRTC_PORT` | `8889` | HTTP-poort voor WebRTC |
-| `DEBIAN` | `12` | gastversie (13 vraagt Proxmox 8.2+) |
-| `CORES` / `RAM` / `DISK` | `1` / `512` / `3` | formaat van de container |
-| `BRIDGE` | `vmbr0` | netwerkbrug (DHCP) |
-| `TEMPLATE_STORAGE` | `local` | opslag voor het template |
-| `ROOTFS_STORAGE` | `local-lvm` | opslag voor de schijf |
-| `MEDIAMTX_VERSION` | `1.21.4` | versie van MediaMTX in de container |
-| `FETCH_ONLY` | `0` | `1` = alleen bestanden ophalen en controleren |
+| kijkpagina | `http://192.168.1.50:8080/kijk/mijnstream` | elke browser, ook op de telefoon |
+| live TS | `http://192.168.1.50:8080/ts/mijnstream` | VLC, mpv |
+| HLS | `http://192.168.1.50:8080/hls/mijnstream/index.m3u8` | browsers, iPhone, spelers |
+| SRT | `srt://192.168.1.50:8890` | SRT-spelers (VLC 3 kan het) |
+| SRT met naam | `srt://192.168.1.50:8890?streamid=read:mijnstream` | spelers die de query meenemen |
 
-## Op een bestaande machine of container
+De kijkpagina stuurt losse beelden achter elkaar (een paar per seconde). Dat is
+geen luiheid: **telefoons kunnen MPEG-TS niet afspelen en Android-Chrome ook geen
+HLS**, dus dit is de enige route die overal werkt zonder app. Voor vloeiend beeld
+op de telefoon gebruik je de VLC-app met de TS-link of de HLS-link (iPhone).
 
-Zonder Proxmox, op Debian of Ubuntu:
+Twee eigenaardigheden waar je tegenaan loopt:
 
-    curl -fsSLO https://raw.githubusercontent.com/Theberas04/srt-relay/main/guest-setup.sh
-    sudo bash guest-setup.sh
+- **VLC gooit de query uit een SRT-URL weg.** `srt://host:8890?streamid=read:naam`
+  wordt in VLC gewoon `srt://host:8890`. De relay geeft een kijker zonder streamid
+  daarom de lopende uitzending; daarom werkt de kale link hier wél.
+- **Kijken kan zonder wachtwoord** (dat is de bedoeling: je deelt één link).
+  Publiceren vraagt altijd het wachtwoord.
 
-Dat installeert de relay in `/opt/srt-relay` met een systemd-dienst
-`srt-relay` en de hulpmiddelen `srt-feed` en `srt-streams`.
+## Het uitzendbord
 
-## Beheer
+Op `http://192.168.1.50:8095` (gebruiker `tom`, het bordwachtwoord uit de
+installatie). Je sleept bestanden in de bibliotheek of zet ze in
+`/srv/streams/bronnen/` in de container, zet ze in de afspeellijst, en kiest:
 
-    pct exec <id> -- systemctl status srt-relay
-    pct exec <id> -- journalctl -u srt-relay -f
-    pct exec <id> -- srt-streams
+- **formaat**: 720p of 1080p, 25 of 50 beelden per seconde, progressief of
+  **interlaced** (echte 50i via veldfrequentie, voor oude decoders);
+- **tijdcode**: van de serverklok (aanbevolen), meelopen met de uitzending, of uit;
+- **titel en crawl** onder in beeld, en of het logo mag stuiteren;
+- **bitrate en preset** (trager = minder bits of mooier beeld).
 
-De volledige config met alle mogelijkheden staat in de container als
-`/opt/srt-relay/mediamtx-volledig-voorbeeld.yml`.
+De klok van de server wordt tijdens het uitzenden in het beeld getekend; die stand
+kost dus rekenkracht (ongeveer twee derde van één kern bij 1080p). De lus zelf
+wordt één keer gebouwd en daarna met `-c copy` uitgezonden.
 
-## Wat er getest is
+![kijkpagina op de telefoon](docs/img/kijkpagina-telefoon.png)
 
-* De installer doorloopt in de testbank (`tests/test-installer.sh`) zeven
-  scenario's met nep-`pct`/`pveam`: alleen ophalen, bestanden echt van GitHub
-  halen, een gewone installatie, een container die niet start (met diagnose),
-  een onbereikbare gast, een bezet container-ID en het kiezen van het eerste
-  vrije ID. De buiten-controle meet tegen een echte HTTP-server, niet tegen
-  een toevallig draaiende dienst.
-* De containerinstallatie is los gedraaid: installeren, dienst starten,
-  zelftest (publiceren via SRT met wachtwoord en het beeld terugkijken),
-  hulpmiddelen, en een tweede run die het wachtwoord en de streams laat staan.
-* Publiceren met een fout wachtwoord wordt geweigerd; publiceren via RTMP
-  (OBS-manier) en terugkijken via SRT werkt; een bron uit het netwerk laten
-  ophalen werkt.
-* Kijken in de browser via WebRTC: 1280x720 H.264 loopt (zie de afbeelding).
+## Beheer in de container
 
-## Licentie
+```bash
+srt-streams                       # wat staat er online, met sporen en kijkers
+srt-feed <naam> <url of bestand>  # een bron naar de relay duwen
+systemctl status srt-relay srt-relay-bord
+journalctl -u srt-relay -n 50     # log van de hub
+```
 
-Alle rechten voorbehouden. MediaMTX zelf valt onder zijn eigen licentie (MIT);
-zie de LICENSE in de container naast de binary.
+Instellingen staan in `/etc/srt-relay/relay.env` (hub) en
+`/etc/srt-relay/uitzendbord.env` (bord); na wijzigen
+`systemctl restart srt-relay srt-relay-bord`. De wachtwoorden staan daar ook in
+(bestand met rechten 600) en blijven bij een herinstallatie bewaard.
+
+## De relay-API
+
+Alles wat het bord doet, kan ook met `curl`:
+
+```bash
+curl -s http://192.168.1.50:8080/api/streams            # wat staat er online
+curl -s -o beeld.jpg http://192.168.1.50:8080/beeld/mijnstream.jpg
+curl -N   http://192.168.1.50:8080/beeldstroom/mijnstream   # beeldstroom (MJPEG)
+```
+
+Het bord gebruikt dezelfde API (`/api/staat`, `/api/bouw`, `/api/start`,
+`/api/stop`, `/api/instellingen`, `/api/upload`) met HTTP Basic-authenticatie.
+
+## Hoe het in elkaar zit
+
+```
+hub/hub.py         de relaydienst: SRT-poort (uitzenden + kijken), RTMP-opvang,
+                   fan-out naar kijkers, HLS, live TS, momentopname, beeldstroom,
+                   kijkpagina en API
+hub/srtkanaal.py   de SRT-koppeling: ctypes op de systeem-libsrt (geen pip nodig)
+hub/tssplit.py     eigen MPEG-TS-ontleder + HLS-segmentering op keyframes
+dashboard/streams.py      de ffmpeg-opdracht: bibliotheek, formaat, titel, tijdcode
+dashboard/uitzendbord.py  het bord zelf (alleen de standaardbibliotheek)
+dashboard/bord.html       de pagina
+```
+
+Eén SRT-poort doet alles: de `streamid` bepaalt of je publiceert of kijkt en onder
+welke naam. Kijkers komen en gaan over dezelfde verbinding; over HTTP krijgt elke
+kijker zijn eigen wachtrij en verzendthread, zodat een trage kijker de stroom niet
+beschadigt.
+
+## Wat er nog niet is
+
+- **WebRTC** (beeld in de browser met heel weinig vertraging in plaats van een paar
+  beelden per seconde) staat op de planning; de kijkpagina is de tussenstap.
+- De relay is bedoeld voor je eigen netwerk. Van buitenaf: zet UDP `SRT_PORT` door
+  naar de container. Is er CGNAT (vergelijk het WAN-adres in de router met je
+  publieke IP), dan is een VPN zoals Tailscale de route.
+
+## Testen
+
+```bash
+bash tests/test-installer.sh     # hostscript met nep-pct/pveam: 6 scenario's
+python3 tests/test-dashboard.py  # het bord: opdrachtbouw, uploads, veilige paden
+```
+
+CI doet daar `bash -n`, shellcheck én een `py_compile` overheen, en haalt in een
+aparte stap alle bestanden écht van `raw.githubusercontent.com` op — anders merk je
+pas bij de gebruiker dat de downloadlijst niet compleet is.
+
+## Rechten
+
+Alle rechten voorbehouden. Wat van derden is blijft van derden: ffmpeg (LGPL/GPL)
+en libsrt (MPL-2.0) vallen onder hun eigen licentie.

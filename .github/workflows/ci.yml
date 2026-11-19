@@ -25,11 +25,19 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           shellcheck -S warning srt-relay.sh guest-setup.sh tests/test-installer.sh
 
+      - name: Python van de relay en het bord
+        run: |
+          python3 -m py_compile hub/*.py dashboard/*.py
+          echo "ok: alle pythonbestanden leesbaar"
+
       - name: Verwijzingen compleet
         run: |
           # Elk bestand dat de installer noemt moet bestaan, en guest-setup.sh
           # moet de marker bevatten waar srt-relay.sh op controleert.
-          for bestand in guest-setup.sh srt-relay.sh README.md docs/img/speler.png; do
+          for bestand in guest-setup.sh srt-relay.sh README.md \
+                  hub/hub.py hub/tssplit.py hub/srtkanaal.py \
+                  dashboard/streams.py dashboard/uitzendbord.py dashboard/bord.html \
+                  docs/img/uitzendbord.png docs/img/kijkpagina-telefoon.png; do
             test -s "$bestand" || { echo "ontbreekt: $bestand"; exit 1; }
             echo "ok: $bestand"
           done

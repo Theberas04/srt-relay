@@ -2,3 +2,5 @@
 tests/stub/
 /tmp/
 *.bak
+__pycache__/
+*.pyc

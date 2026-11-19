@@ -28,7 +28,7 @@ cat > "$STUB/pveam" <<'EOF'
 case "${1:-}" in
   update) exit 0 ;;
   list)   exit 0 ;;                      # niets aanwezig -> downloadpad
-  available) echo "system           debian-12-standard_12.7-1_amd64.tar.zst" ;;
+  available) printf 'system           debian-13-standard_13.1-1_amd64.tar.zst\nsystem           debian-12-standard_12.7-1_amd64.tar.zst\n' ;;
   download) echo "downloaded" ; exit 0 ;;
   *) exit 0 ;;
 esac
@@ -69,11 +69,12 @@ case "${1:-}" in
     shift 2
     [ "${1:-}" = "--" ] && shift
     case "$*" in
-      *"ip -4 -o addr show eth0"*) echo "2: eth0    inet ${GAST_IP:-192.168.1.16}/24 brd 192.168.1.255 scope global eth0" ;;
-      *guest-setup.sh*)  printf 'ok   ffmpeg\nok   mediamtx v1.21.4 geinstalleerd\nWACHTWOORD testwachtwoord123\nZELFTEST OK\nSRT-RELAY-GUEST-KLAAR ip=%s poort=8890 wachtwoord=testwachtwoord123\n' "${GAST_IP:-192.168.1.16}" ;;
+      *"ip -4 -o addr show eth0"*) echo "2: eth0    inet ${GAST_IP:-192.168.1.50}/24 brd 192.168.1.255 scope global eth0" ;;
+      *guest-setup.sh*)  printf 'ok   ffmpeg 7.1.5\nok   libsrt: libsrt-gnutls.so.1.5\n  WACHTWOORD testwachtwoord123\n  BORD wachtwoord=bordtest123\nZELFTEST OK\nZELFTEST BORD OK\n' ;;
       *"is-active --quiet srt-relay"*) exit 0 ;;
       *"ss -lun"*) exit 0 ;;
-      *"grep -A2"*) echo "testwachtwoord123" ;;
+      *"/api/streams"*) echo '{"streams": [], "srt_poort": 8890, "geladen": true}' ;;
+      *"relay.env"*) echo "testwachtwoord123" ;;
       *) echo "pct exec: onbekend: $*" >&2; exit 1 ;;
     esac ;;
   destroy) rm -f "$CTDIR/$ID"; echo "destroyed $ID" ;;
@@ -107,18 +108,18 @@ run() {
 mkdir -p /tmp/srt-relay-test/pve
 rm -f "$CTDIR"/* 2>/dev/null
 
-# Een nep-relay op een eigen poort, zodat de HTTP-controle van buitenaf echt
+# Een nep-bordpagina op een eigen poort, zodat de HTTP-controle van buitenaf echt
 # gemeten wordt (en niet afhangt van wat er toevallig op de testmachine draait).
-HLS_PORT=18888
+BORD_POORT_NEP=18888
 WEBMAP=/tmp/srt-relay-test/web
 mkdir -p "$WEBMAP/controle"
 printf 'ok\n' > "$WEBMAP/controle/index.html"
-python3 -m http.server "$HLS_PORT" --bind 127.0.0.1 --directory "$WEBMAP" >/dev/null 2>&1 &
+python3 -m http.server "$BORD_POORT_NEP" --bind 127.0.0.1 --directory "$WEBMAP" >/dev/null 2>&1 &
 WEBPID=$!
 trap 'kill $WEBPID 2>/dev/null; true' EXIT
 sleep 1
-if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HLS_PORT/controle/" | grep -q 200; then
-  echo "nep-relay op 127.0.0.1:$HLS_PORT draait (pid $WEBPID)"
+if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$BORD_POORT_NEP/controle/" | grep -q 200; then
+  echo "nep-bord op 127.0.0.1:$BORD_POORT_NEP draait (pid $WEBPID)"
 else
   echo "MISLUKT: kon de nep-relay niet starten"; exit 1
 fi
@@ -148,9 +149,9 @@ fi
 
 # Scenario 1: alles goed (gast = de nep-relay op 127.0.0.1)
 rm -f "$CTDIR"/*
-run "gewone installatie" 0 CTID=140 GAST_IP=127.0.0.1 HLS_PORT="$HLS_PORT" || exit 1
+run "gewone installatie" 0 CTID=140 GAST_IP=127.0.0.1 BORD_POORT="$BORD_POORT_NEP" || exit 1
 [ -f "$CTDIR/140" ] || { echo "MISLUKT: container 140 niet aangemaakt"; exit 1; }
-if printf '%s' "$LAATSTE_UIT" | grep -q "relay antwoordt op http://127.0.0.1:$HLS_PORT"; then
+if printf '%s' "$LAATSTE_UIT" | grep -q "uitzendbord antwoordt op http://127.0.0.1:$BORD_POORT_NEP"; then
   echo "ok: HTTP-controle van buitenaf geslaagd"
 else
   echo "MISLUKT: HTTP-controle van buitenaf niet geslaagd"; exit 1
@@ -163,10 +164,10 @@ run "starten mislukt (ladder + diagnose)" 1 CTID=141 START_FAALT=1 || exit 1
 # Scenario 3: gast meldt een mislukte zelftest
 rm -f "$CTDIR"/*
 uit="$(env PATH="$STUB:$PATH" CTDIR="$CTDIR" PVE_ETC=/tmp/srt-relay-test/pve \
-      GAST_IP=192.0.2.99 CTID=142 bash "$HIER/../srt-relay.sh" 2>&1)"
+      GAST_IP=192.0.2.99 CTID=142 BORD_POORT=8888 bash "$HIER/../srt-relay.sh" 2>&1)"
 echo "$uit" | tail -6
 echo "--- controle op de HTTP-controle van buitenaf ---"
-if printf '%s' "$uit" | grep -q "geen antwoord van http://192.0.2.99:8888"; then
+if printf '%s' "$uit" | grep -q "geen antwoord van het uitzendbord op http://192.0.2.99:8888"; then
   echo "ok: onbereikbare gast wordt als fout gemeld"
 else
   echo "MISLUKT: onbereikbare gast niet gemeld"; exit 1
@@ -187,7 +188,7 @@ fi
 rm -f "$CTDIR"/*
 : > "$CTDIR/130"
 uit="$(env PATH="$STUB:$PATH" CTDIR="$CTDIR" PVE_ETC=/tmp/srt-relay-test/pve \
-      GAST_IP=127.0.0.1 HLS_PORT="$HLS_PORT" bash "$HIER/../srt-relay.sh" 2>&1)"
+      GAST_IP=127.0.0.1 BORD_POORT="$BORD_POORT_NEP" bash "$HIER/../srt-relay.sh" 2>&1)"
 if printf '%s' "$uit" | grep -q "container-ID 131" && [ -f "$CTDIR/131" ]; then
   echo "ok: eerste vrije ID (131) gekozen"
 else

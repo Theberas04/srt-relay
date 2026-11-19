@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 #
-# srt-relay — zet een SRT-relay / livestream-hub (MediaMTX) neer in een eigen
-# Proxmox-LXC. Draai dit op de Proxmox-host als root:
+# srt-relay — zet een SRT-relay / livestream-hub neer in een eigen Proxmox-LXC.
+# Draai dit op de Proxmox-host als root:
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Theberas04/srt-relay/main/srt-relay.sh)
+#
+# De relay is eigen code (hub/hub.py): één SRT-poort waarop je kunt uitzenden én
+# kijken, plus RTMP, eigen HLS, live TS, momentopnamen en een API. Er wordt geen
+# kant-en-klare streamserver geïnstalleerd.
 #
 # Opties (als omgevingsvariabele mee te geven):
 #   CTID=130            vast container-ID (standaard: eerst vrije)
 #   CTNAME=srt-relay    hostnaam van de container
 #   SRT_PORT=8890       UDP-poort van het relay
-#   DEBIAN=12           gastversie (12 aanbevolen; 13 vraagt Proxmox 8.2+)
+#   HTTP_PORT=8080      HTTP-poort van het relay (HLS, live TS, API)
+#   RTMP_PORT=1935      RTMP-poort (OBS)
+#   BORD_POORT=8095     poort van het uitzendbord
+#   DEBIAN=13           gastversie (12 of 13)
 #   CORES=1 RAM=512 DISK=3
 #   BRIDGE=vmbr0  TEMPLATE_STORAGE=local  ROOTFS_STORAGE=local-lvm
 #   FETCH_ONLY=1        alleen de bestanden ophalen en controleren, niets aanmaken
@@ -24,9 +31,9 @@ CTID="${CTID:-}"
 CTNAME="${CTNAME:-srt-relay}"
 SRT_PORT="${SRT_PORT:-8890}"
 RTMP_PORT="${RTMP_PORT:-1935}"
-HLS_PORT="${HLS_PORT:-8888}"
-WEBRTC_PORT="${WEBRTC_PORT:-8889}"
-DEBIAN="${DEBIAN:-12}"
+HTTP_PORT="${HTTP_PORT:-8080}"
+BORD_POORT="${BORD_POORT:-8095}"
+DEBIAN="${DEBIAN:-13}"
 CORES="${CORES:-1}"
 RAM="${RAM:-512}"
 DISK="${DISK:-3}"
@@ -35,6 +42,10 @@ TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
 ROOTFS_STORAGE="${ROOTFS_STORAGE:-local-lvm}"
 FETCH_ONLY="${FETCH_ONLY:-0}"
 PVE_ETC="${PVE_ETC:-/etc/pve}"   # alleen anders bij een afwijkende opstelling of in tests
+
+# De bestanden die de gast nodig heeft. De gast haalt ze zelf op; hier controleren
+# we alleen of ze bestaan, zodat je niet halverwege een halve installatie hebt.
+BESTANDEN="guest-setup.sh hub/hub.py hub/tssplit.py hub/srtkanaal.py dashboard/streams.py dashboard/uitzendbord.py dashboard/bord.html"
 
 FOUTEN=0
 zeg()  { printf '%s\n' "$*"; }
@@ -75,8 +86,6 @@ trap 'rm -rf "$TMP"' EXIT
 
 stap "Installatiebestanden ophalen"
 
-# Lokaal bestand naast dit script wint (handig als je vanuit een checkout draait),
-# anders vanaf GitHub.
 if [ -f "$(dirname "${BASH_SOURCE[0]}")/guest-setup.sh" ]; then
     cp "$(dirname "${BASH_SOURCE[0]}")/guest-setup.sh" "$TMP/guest-setup.sh"
     ok "guest-setup.sh (uit deze map)"
@@ -94,6 +103,21 @@ if [ ! -s "$TMP/guest-setup.sh" ] || ! grep -q "SRT-RELAY-GUEST-SETUP" "$TMP/gue
     exit 1
 fi
 ok "$(wc -c <"$TMP/guest-setup.sh") bytes, marker gevonden"
+
+# De gast haalt de code zelf op; hier controleren we of elk bestand er echt staat,
+# anders kom je er pas in de container achter dat er iets ontbreekt.
+ontbreekt=0
+for bestand in $BESTANDEN; do
+    if [ -f "$(dirname "${BASH_SOURCE[0]}")/$bestand" ]; then
+        ok "$bestand (uit deze map)"
+    elif curl -fsSL --max-time 30 -o /dev/null "$RAW/$bestand"; then
+        ok "$bestand staat op GitHub"
+    else
+        fout "$bestand staat niet op $RAW"
+        ontbreekt=$((ontbreekt + 1))
+    fi
+done
+[ "$ontbreekt" -eq 0 ] || { zeg "  Zet eerst alle bestanden in de repo en push ze."; exit 1; }
 
 if [ "$FETCH_ONLY" = "1" ]; then
     stap "FETCH_ONLY: niets aangemaakt"
@@ -157,7 +181,7 @@ if ! pct create "$CTID" "$TEMPLATE" \
         --unprivileged 1 \
         --features nesting=1 \
         --onboot 1 \
-        --description "SRT-relay / livestream-hub (MediaMTX). Beheer: /usr/local/bin/srt-feed" \
+        --description "SRT-relay / livestream-hub. Beheer in de container: srt-streams, srt-feed" \
         >/dev/null 2>"$TMP/create.log"; then
     fout "pct create mislukt"
     sed 's/^/       /' "$TMP/create.log"
@@ -191,13 +215,14 @@ fi
 
 if [ "$start_lukt" -ne 1 ]; then
     fout "container $CTID wil niet starten"
-    zeg "  --- pveversion ---";        pveversion | head -2 | sed 's/^/     /'
-    zeg "  --- pct config ---";        pct config "$CTID" 2>&1 | sed 's/^/     /'
-    zeg "  --- laatste regels ---";    tail -n 15 /var/log/pve/tasks/index 2>/dev/null | sed 's/^/     /'
-    zeg "  --- dmesg ---";             dmesg 2>/dev/null | tail -n 15 | sed 's/^/     /'
+    zeg "  --- pveversion ---";     pveversion | head -2 | sed 's/^/     /'
+    zeg "  --- pct config ---";     pct config "$CTID" 2>&1 | sed 's/^/     /'
+    zeg "  --- laatste regels ---"; tail -n 15 /var/log/pve/tasks/index 2>/dev/null | sed 's/^/     /'
+    zeg "  --- dmesg ---";          dmesg 2>/dev/null | tail -n 15 | sed 's/^/     /'
     zeg ""
     zeg "  Repareren kan zo:"
-    zeg "     bash <(curl -fsSL $RAW/srt-relay.sh)   # met CTID=$CTID na het opruimen"
+    zeg "     pct destroy $CTID"
+    zeg "     bash <(curl -fsSL $RAW/srt-relay.sh)"
     exit 1
 fi
 
@@ -219,7 +244,7 @@ fi
 ok "IP-adres $IP"
 
 stap "Relay installeren in de container"
-zeg "  (ffmpeg en MediaMTX downloaden, kan een paar minuten duren)"
+zeg "  (ffmpeg installeren en de relay opzetten, kan een paar minuten duren)"
 
 if ! pct push "$CTID" "$TMP/guest-setup.sh" /root/guest-setup.sh; then
     fout "kon guest-setup.sh niet in de container zetten"
@@ -228,22 +253,30 @@ fi
 
 LOG="$TMP/guest.log"
 if ! pct exec "$CTID" -- env \
-        SRT_PORT="$SRT_PORT" RTMP_PORT="$RTMP_PORT" \
-        HLS_PORT="$HLS_PORT" WEBRTC_PORT="$WEBRTC_PORT" \
+        SRT_PORT="$SRT_PORT" RTMP_PORT="$RTMP_PORT" HTTP_PORT="$HTTP_PORT" \
+        BORD_POORT="$BORD_POORT" \
+        REPO="$REPO" BRANCH="$BRANCH" REPO_RAW="$RAW" \
         bash /root/guest-setup.sh >"$LOG" 2>&1; then
     fout "installatie in de container mislukte (laatste regels):"
     tail -n 25 "$LOG" | sed 's/^/     /'
-    zeg "     Volledige log op de host: pct exec $CTID -- journalctl -u srt-relay -n 50"
+    zeg "     Volledige log: pct exec $CTID -- journalctl -u srt-relay -n 50"
     exit 1
 fi
-sed 's/^/  /' "$LOG" | grep -E "ok |\[fout\]|ZELFTEST|WACHTWOORD|let op" || true
+sed 's/^/  /' "$LOG" | grep -E "ok |\[fout\]|ZELFTEST|WACHTWOORD|BORD|let op" || true
 
 if ! grep -q "ZELFTEST OK" "$LOG"; then
     fout "de relay draait niet aantoonbaar: zelftest in de container is niet geslaagd"
     tail -n 20 "$LOG" | sed 's/^/     /'
     exit 1
 fi
-ok "zelftest in de container geslaagd (publiceren + terugkijken over SRT)"
+ok "zelftest geslaagd (uitzenden, terugkijken, segmenten, momentopname)"
+
+if ! grep -q "ZELFTEST BORD OK" "$LOG"; then
+    fout "het uitzendbord bouwt of zendt niet aantoonbaar uit"
+    tail -n 20 "$LOG" | sed 's/^/     /'
+    exit 1
+fi
+ok "zelftest van het uitzendbord geslaagd (bouwen + uitzenden)"
 
 # ---------------------------------------------------------------- controle van buitenaf
 
@@ -255,47 +288,73 @@ else
     fout "dienst srt-relay is niet actief"
 fi
 
+if pct exec "$CTID" -- systemctl is-active --quiet srt-relay-bord; then
+    ok "dienst srt-relay-bord is actief"
+else
+    fout "dienst srt-relay-bord is niet actief"
+fi
+
 if pct exec "$CTID" -- bash -c "ss -lun | grep -q ':$SRT_PORT '"; then
-    ok "UDP-poort $SRT_PORT luistert"
+    ok "UDP-poort $SRT_PORT luistert (SRT)"
 else
     fout "UDP-poort $SRT_PORT luistert niet in de container"
 fi
 
-WEB="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$IP:$HLS_PORT/controle/")"
-if [ "$WEB" = "200" ]; then
-    ok "relay antwoordt op http://$IP:$HLS_PORT (HTTP 200)"
+API="$(pct exec "$CTID" -- bash -c "curl -fsS --max-time 5 http://127.0.0.1:$HTTP_PORT/api/streams")"
+if printf '%s' "$API" | grep -q '"streams"'; then
+    ok "de relay antwoordt op zijn API (http://$IP:$HTTP_PORT)"
 else
-    fout "geen antwoord van http://$IP:$HLS_PORT (kreeg '$WEB')"
+    fout "geen antwoord van de API van de relay (kreeg '${API:0:60}')"
+fi
+
+BORD_WEB="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$IP:$BORD_POORT/")"
+if [ "$BORD_WEB" = "200" ]; then
+    ok "uitzendbord antwoordt op http://$IP:$BORD_POORT (HTTP 200)"
+elif [ "$BORD_WEB" = "401" ]; then
+    ok "uitzendbord vraagt om inloggen op http://$IP:$BORD_POORT (HTTP 401 = goed)"
+elif [ "$BORD_WEB" = "000" ]; then
+    fout "geen antwoord van het uitzendbord op http://$IP:$BORD_POORT (poort dicht of verkeerd adres)"
+else
+    let_op "het uitzendbord antwoordde met HTTP $BORD_WEB op http://$IP:$BORD_POORT"
 fi
 
 # ---------------------------------------------------------------- samenvatting
 
-WACHTWOORD="$(awk '/^WACHTWOORD /{print $2; exit}' "$LOG" 2>/dev/null)"
-if [ -z "$WACHTWOORD" ]; then
-    WACHTWOORD="$(pct exec "$CTID" -- bash -c 'grep -A2 "^  - user: tom$" /opt/srt-relay/mediamtx.yml | awk "/pass:/{print \$2; exit}"')"
-fi
+WACHTWOORD="$(awk '/^  WACHTWOORD /{print $2; exit}' "$LOG" 2>/dev/null)"
+BORD_WW="$(awk '/^  BORD wachtwoord=/{sub(/^  BORD wachtwoord=/, ""); print; exit}' "$LOG" 2>/dev/null)"
+[ -n "$WACHTWOORD" ] || WACHTWOORD="$(pct exec "$CTID" -- bash -c "sed -n 's/^PUB_PASS=//p' /etc/srt-relay/relay.env | head -1")"
+[ -n "$BORD_WW" ] && : || BORD_WW="$(pct exec "$CTID" -- bash -c "sed -n 's/^BORD_WACHTWOORD=//p' /etc/srt-relay/uitzendbord.env | head -1")"
 
 stap "Klaar"
 
 zeg "  Relay:            $IP  (container $CTID, $CTNAME)"
 zeg "  SRT-poort:        $SRT_PORT/udp"
+zeg "  HTTP-poort:       $HTTP_PORT/tcp"
+zeg ""
+zeg "  Uitzendbord:      http://$IP:$BORD_POORT/"
+zeg "                    gebruiker tom, wachtwoord ${BORD_WW:-zie /etc/srt-relay/uitzendbord.env}"
+zeg "     Daar kies je bestanden uit de bibliotheek, zet je titel en crawl klaar,"
+zeg "     kies je formaat en tijdcode, en zend je uit."
 zeg ""
 zeg "  Publiceren (OBS, ffmpeg, telefoon):"
 zeg "     srt://$IP:$SRT_PORT?streamid=publish:mijnstream:tom:$WACHTWOORD"
-zeg "     rtmp://$IP:$RTMP_PORT   sleutel: mijnstream?user=tom&pass=$WACHTWOORD"
+zeg "     rtmp://$IP:$RTMP_PORT/live   sleutel: obs?user=tom&pass=$WACHTWOORD"
 zeg ""
 zeg "  Kijken:"
-zeg "     srt://$IP:$SRT_PORT?streamid=read:mijnstream"
-zeg "     http://$IP:$WEBRTC_PORT/mijnstream/     (WebRTC, laagste vertraging)"
-zeg "     http://$IP:$HLS_PORT/mijnstream/     (HLS)"
+zeg "     http://$IP:$HTTP_PORT/kijk/mijnstream        (kijkpagina, werkt op de telefoon)"
+zeg "     http://$IP:$HTTP_PORT/ts/mijnstream          (VLC)"
+zeg "     http://$IP:$HTTP_PORT/hls/mijnstream/index.m3u8   (HLS)"
+zeg "     srt://$IP:$SRT_PORT                          (SRT-speler; zonder streamid krijg je"
+zeg "                                                   de lopende uitzending — VLC gooit"
+zeg "                                                   de query uit een SRT-URL weg)"
 zeg ""
 zeg "  Beheer in de container:"
-zeg "     pct exec $CTID -- srt-streams            # wat staat er online"
-zeg "     pct exec $CTID -- srt-feed voordeur rtsp://192.168.1.50:554/h264"
-zeg "     pct exec $CTID -- systemctl status srt-relay"
+zeg "     pct exec $CTID -- srt-streams              # wat staat er online"
+zeg "     pct exec $CTID -- srt-feed naam bestand.mp4"
+zeg "     pct exec $CTID -- systemctl status srt-relay srt-relay-bord"
 zeg ""
-zeg "  Van buitenaf: zet in je router UDP $SRT_PORT door naar $IP,"
-zeg "  en gebruik dan srt://<jouw-domein>:$SRT_PORT?streamid=read:mijnstream."
+zeg "  Van buitenaf: zet UDP $SRT_PORT door naar $IP en geef kijkers de SRT-link."
+zeg "     Kijken kan zonder wachtwoord; publiceren vraagt het wachtwoord hierboven."
 zeg ""
 zeg "  Opruimen:  pct destroy $CTID"
 
