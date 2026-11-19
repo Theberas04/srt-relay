@@ -290,7 +290,13 @@ def test_bord(werk: str) -> None:
                 break
         if gebouwd:
             ok(f"het bord bouwt het testbeeld ({gebouwd['voortgang']}%)")
-            lus = os.path.join(bordwerk, "lust.mp4")
+            # Het bord bouwt naar een nieuw bestand (lus-<tijdstip>.mp4), zodat
+            # het bestand dat een lopende uitzending leest nooit overschreven
+            # wordt: daar struikelt ffmpeg anders halverwege over.
+            lus = gebouwd.get("bestand") or os.path.join(bordwerk, "lust.mp4")
+            eis(os.path.basename(lus).startswith("lus-"),
+                f"het bouwen schrijft naar een nieuw lusbestand ({os.path.basename(lus)})")
+            eis(os.path.exists(lus), "het nieuwe lusbestand staat er")
             sporen = ffprobe(lus, "stream=codec_type")
             eis(sporen.count("audio") == 4,
                 f"het lusbestand heeft vier stereosporen ({sporen})")
@@ -302,6 +308,8 @@ def test_bord(werk: str) -> None:
         time.sleep(3)
         _, staat = haal(f"{basis}/api/staat", wachtwoord="geheim123")
         eis(staat["uitzending"]["actief"] is True, "het bord meldt dat het uitzendt")
+        eis("snelheid" in staat["uitzending"] and "achterstand" in staat["uitzending"],
+            "het bord meldt de snelheid en de achterstand van de uitzending")
         eis(staat["uitzending"]["naam"] == "bordproef",
             f"de stream heet zoals ingesteld ({staat['uitzending']['naam']})")
 
@@ -316,7 +324,7 @@ def test_bord(werk: str) -> None:
 
         _, logboek = haal(f"{basis}/api/log?vanaf=0", wachtwoord="geheim123")
         regels = " ".join(r["regel"] for r in logboek.get("regels", []))
-        eis("klaar: lust.mp4" in regels, "het log vertelt dat het bouwen klaar is")
+        eis("klaar: lus-" in regels, "het log vertelt dat het bouwen klaar is")
     finally:
         proces.terminate()
         try:

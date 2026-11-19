@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+import glob
 import hmac
 import json
 import os
@@ -45,10 +46,10 @@ STANDAARD = {
     "tijdcode": "serverklok",
     "kanaalvak": True,
     "logo": True,
-    "formaat": "1080",
+    "formaat": "720",
     "fps": 25,
     "interlaced": False,
-    "bitrate": "8M",
+    "bitrate": "4M",
     "preset": "veryfast",
     "kanalen": 8,
     "slot": 3.0,
@@ -57,6 +58,14 @@ STANDAARD = {
 }
 
 MEDIA_EXTENSIES = streams.MEDIA_EXTENSIES
+
+# Hoeveel het beeld mag achterlopen op de klok voordat we ingrijpen. Een file-lus
+# met een klok erin hoort in echte tijd te lopen; een machine die het formaat niet
+# bijhoudt loopt anders uren achter (het beeld toont dan een tijd van lang geleden).
+DREMPEL_LET_OP = 15.0        # seconden: hier waarschuwen we
+DREMPEL_HERSTART = 30.0      # seconden: hier zetten we de uitzending opnieuw in
+MAX_HERSTARTS = 3
+
 PRESETS = ["ultrafast", "veryfast", "faster", "fast", "medium", "slow"]
 LOGO_PAD = os.environ.get(
     "SRT_LOGO", "")          # leeg = geen logo; zet SRT_LOGO op een png om er een te gebruiken
@@ -165,7 +174,10 @@ def laad_instellingen() -> None:
     except (OSError, ValueError):
         return
     if isinstance(gegevens, dict):
-        INSTELLINGEN.update({k: v for k, v in gegevens.items() if k in STANDAARD})
+        # "lusbestand" hoort erbij: dat is het bestand dat de uitzending leest, en
+        # zonder deze uitzondering vergeet het bord na een herstart welke lus er is
+        INSTELLINGEN.update({k: v for k, v in gegevens.items()
+                             if k in STANDAARD or k == "lusbestand"})
 
 
 def werk_pad(naam: str) -> str:
@@ -290,7 +302,11 @@ def render_klaar(uitpad: str, opties: dict) -> None:
 
 
 def doe_render() -> None:
-    uitpad = werk_pad("lust.mp4")
+    # Nooit schrijven naar het bestand dat een lopende uitzending leest: ffmpeg
+    # struikelt dan halverwege over nieuwe inhoud (decodeerfouten) en de
+    # uitzending valt stil. Bouw naar een nieuw bestand en zet de uitzending pas
+    # over als het klaar is.
+    uitpad = werk_pad("lus-" + time.strftime("%Y%m%d-%H%M%S") + ".mp4")
     filterpad = werk_pad("beeld.filter")
     tonenpad = werk_pad("tonen.wav")
     try:
@@ -338,6 +354,7 @@ def doe_render() -> None:
         with SLOT:
             S["render"].update({"voortgang": 100.0, "klaar": True,
                                 "bestand": uitpad, "fout": None})
+        nieuwe_lus_in_gebruik(uitpad)
     except Exception as fout:                              # noqa: BLE001
         with SLOT:
             S["render"]["fout"] = str(fout)[:400]
@@ -374,6 +391,44 @@ def start_render() -> bool:
     return True
 
 
+def nieuwe_lus_in_gebruik(uitpad: str) -> None:
+    """De verse lus in gebruik nemen en een lopende uitzending overzetten."""
+    with SLOT:
+        INSTELLINGEN["lusbestand"] = uitpad
+        loopt = bool(S["uitzending"]["actief"])
+    bewaar_instellingen()
+    meld(f"nieuwe lus in gebruik: {os.path.basename(uitpad)}")
+    if loopt:
+        meld("de uitzending loopt — ik zet hem over op de nieuwe lus")
+        veilige_thread(herstart_uitzending, naam="overzetten")
+    veilige_thread(ruim_oude_lussen_op, uitpad, naam="lussen-opruimen")
+
+
+def herstart_uitzending() -> None:
+    """De uitzending opnieuw inzetten (voor een overzetting of om bij te komen)."""
+    stop_uitzending()
+    time.sleep(2.0)
+    try:
+        start_uitzending()
+    except ValueError as fout:                              # noqa: BLE001
+        meld(f"opnieuw starten van de uitzending lukte niet: {fout}")
+
+
+def ruim_oude_lussen_op(huidig: str) -> None:
+    """Oude lusbestanden weg, met ruime marge voor wat nog gelezen kan worden."""
+    nu = time.time()
+    for pad in glob.glob(werk_pad("lus-*.mp4")) + [werk_pad("lust.mp4")]:
+        if pad == huidig or not os.path.exists(pad):
+            continue
+        if nu - os.path.getmtime(pad) < 600:                # tien minuten marge
+            continue
+        try:
+            os.remove(pad)
+            meld(f"oude lus opgeruimd: {os.path.basename(pad)}")
+        except OSError:
+            pass
+
+
 # -------------------------------------------------------------- uitzending ---
 
 
@@ -391,14 +446,46 @@ def bewaak_uitzending(proces: subprocess.Popen, naam: str, verwacht: int) -> Non
         if verwacht and stand["sporen"] < verwacht:
             meld(f"LET OP: verwacht {verwacht} sporen, relay telt er "
                  f"{stand['sporen']} — gaat er onderweg een spoor verloren?")
+    herstarts = 0
     while proces.poll() is None:
         stand = relay_status(naam)
         with SLOT:
             if stand.get("bekend"):
                 S["uitzending"]["relay"] = stand
+            media = S["uitzending"].get("media_tijd")
+            gestart = S["uitzending"].get("gestart") or time.time()
+        looptijd = time.time() - gestart
+        if media and looptijd > 10:
+            # De uitzending hoort in echte tijd te lopen: het beeld mag niet
+            # achterblijven bij de klok. media_tijd is hoever ffmpeg gekomen is.
+            achterstand = looptijd - media
+            with SLOT:
+                S["uitzending"]["achterstand"] = round(achterstand, 1)
+            if achterstand > DREMPEL_LET_OP:
+                meld(f"LET OP: de uitzending loopt {achterstand:.0f} s achter — "
+                     "deze machine houdt dit formaat niet bij. Kies een lichter "
+                     "formaat, een snellere preset of meer cores voor de container.")
+            if achterstand > DREMPEL_HERSTART and herstarts < MAX_HERSTARTS:
+                herstarts += 1
+                meld(f"de uitzending loopt {achterstand:.0f} s achter op de klok — "
+                     f"ik zet hem opnieuw in om weer bij de tijd te komen "
+                     f"({herstarts} van {MAX_HERSTARTS})")
+                veilige_thread(herstart_uitzending, naam="bijkomen")
+                return
+            if herstarts >= MAX_HERSTARTS and achterstand > DREMPEL_HERSTART:
+                herstarts += 1                     # één keer melden, niet blijven zeuren
+                meld("de uitzending blijft achterlopen; ik stop met opnieuw "
+                     "inzetten. Neem een lichter formaat of meer cores.")
         time.sleep(5)
     with SLOT:
-        S["uitzending"].update({"actief": False, "proc": None})
+        # Alleen opruimen als dit nog steeds de lopende uitzending is: na een
+        # overzetting loopt er al een nieuwe, en een oude bewaker mag die
+        # toestand niet wissen (het bord zou dan "uit" melden terwijl het beeld
+        # gewoon loopt).
+        if S["uitzending"].get("proc") is proces:
+            S["uitzending"].update({"actief": False, "proc": None,
+                                    "snelheid": None, "achterstand": None,
+                                    "media_tijd": None})
     if proces.returncode not in (0, -15, -9):
         meld(f"uitzending gestopt met code {proces.returncode} — zie het log")
     else:
@@ -409,8 +496,8 @@ def start_uitzending() -> dict:
     with SLOT:
         if S["uitzending"]["actief"]:
             raise ValueError("er loopt al een uitzending — stop die eerst")
-    lusbestand = werk_pad("lust.mp4")
-    if not os.path.exists(lusbestand):
+    lusbestand = INSTELLINGEN.get("lusbestand") or werk_pad("lust.mp4")
+    if not lusbestand or not os.path.exists(lusbestand):
         raise ValueError("er is nog geen lusbestand — klik eerst op 'bouwen'")
     relay = CONFIG["relay"]
     if not relay.get("wachtwoord"):
@@ -441,10 +528,30 @@ def start_uitzending() -> dict:
 
 
 def lees_procesuitvoer(proces: subprocess.Popen) -> None:
+    """Leest de uitvoer van de uitzender: voortgang eruit, meldingen in het log."""
     for regel in (proces.stdout or ()):
         regel = regel.strip()
-        if regel:
-            meld(regel[:400])
+        if not regel:
+            continue
+        if regel.startswith("out_time_us="):
+            waarde = regel.split("=", 1)[1]
+            if waarde.isdigit():
+                with SLOT:
+                    S["uitzending"]["media_tijd"] = int(waarde) / 1e6
+            continue
+        if regel.startswith("speed="):
+            with SLOT:
+                S["uitzending"]["snelheid"] = regel.split("=", 1)[1].strip()
+            continue
+        if regel.startswith("fps="):
+            with SLOT:
+                S["uitzending"]["beelden_per_seconde"] = regel.split("=", 1)[1].strip()
+            continue
+        if regel.startswith(("frame=", "bitrate=", "total_size=", "out_time=",
+                             "out_time_ms=", "dup_frames=", "drop_frames=",
+                             "stream_", "progress=")):
+            continue
+        meld(regel[:400])
 
 
 def veilige_thread(doel, *argumenten, naam: str = "taak") -> threading.Thread:
@@ -681,6 +788,10 @@ class Bord(BaseHTTPRequestHandler):
             uitzending = {"actief": S["uitzending"]["actief"],
                           "naam": S["uitzending"].get("naam"),
                           "gestart": S["uitzending"].get("gestart"),
+                          "snelheid": S["uitzending"].get("snelheid"),
+                          "beelden_per_seconde":
+                              S["uitzending"].get("beelden_per_seconde"),
+                          "achterstand": S["uitzending"].get("achterstand"),
                           "relay": S["uitzending"].get("relay", {})}
         naam = uitzending["naam"] or veilige_naam(instellingen["streamnaam"])
         return {

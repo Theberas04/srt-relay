@@ -352,6 +352,13 @@ function tekenStaat(s){
     : (relay0 && relay0.online
         ? `“${naam}” is in de lucht (niet via dit bord gestart)`
         : "uitzending uit");
+  // Hoe snel de uitzender werkt en of het beeld achterloopt op de klok. Zonder
+  // deze twee cijfers zie je niet dat een machine het formaat niet bijhoudt.
+  if(s.uitzending.actief && s.uitzending.snelheid)
+    $("#tekstUit").textContent += ` · ${s.uitzending.snelheid}`
+      + (s.uitzending.beelden_per_seconde ? ` (${s.uitzending.beelden_per_seconde})` : "")
+      + (s.uitzending.achterstand > 15
+          ? ` · loopt ${Math.round(s.uitzending.achterstand)} s achter` : "");
   if(s.render.fout) zeg("Bouwen mislukte: " + s.render.fout, true);
 
   const relay = s.relay || {};

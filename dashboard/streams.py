@@ -337,6 +337,10 @@ def bouw_uitzend_opdracht(looppad: str, host: str, poort: int, naam: str,
     doel = (f"srt://{host}:{poort}"
             f"?streamid=publish:{naam}:{gebruiker}:{wachtwoord}")
     opdracht = ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+                # machineleesbare voortgang op de uitvoer: daarmee kan het bord
+                # zien of deze machine het formaat bijhoudt (speed=) en hoeveel
+                # het beeld achterloopt ten opzichte van de klok
+                "-progress", "pipe:1", "-nostats",
                 "-re", "-stream_loop", "-1", "-i", looppad,
                 "-map", "0:v", "-map", "0:a"]
     if opties and tijdcode_modus(opties) == "serverklok":

@@ -17,7 +17,7 @@
 #   RTMP_PORT=1935      RTMP-poort (OBS)
 #   BORD_POORT=8095     poort van het uitzendbord
 #   DEBIAN=13           gastversie (12 of 13)
-#   CORES=1 RAM=512 DISK=3
+#   CORES=2 RAM=512 DISK=3      (4 cores voor 1080p50 met een live klok)
 #   BRIDGE=vmbr0  TEMPLATE_STORAGE=local  ROOTFS_STORAGE=local-lvm
 #   FETCH_ONLY=1        alleen de bestanden ophalen en controleren, niets aanmaken
 #
@@ -34,7 +34,7 @@ RTMP_PORT="${RTMP_PORT:-1935}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 BORD_POORT="${BORD_POORT:-8095}"
 DEBIAN="${DEBIAN:-13}"
-CORES="${CORES:-1}"
+CORES="${CORES:-2}"     # x264 heeft meer dan één kern nodig voor 1080p
 RAM="${RAM:-512}"
 DISK="${DISK:-3}"
 BRIDGE="${BRIDGE:-vmbr0}"

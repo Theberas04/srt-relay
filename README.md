@@ -100,6 +100,27 @@ De klok van de server wordt tijdens het uitzenden in het beeld getekend; die sta
 kost dus rekenkracht (ongeveer twee derde van één kern bij 1080p). De lus zelf
 wordt één keer gebouwd en daarna met `-c copy` uitgezonden.
 
+**De uitzending moet de klok bijhouden.** Een kanaal met een klok in beeld hoort in
+echte tijd te lopen; een machine die het formaat niet bijhoudt loopt anders uren
+achter en dan zie je in het beeld een tijd van lang geleden. Het bord meet daarom de
+snelheid van de uitzender en toont die naast de status (bijvoorbeeld `0,98x
+(24,4)`). Komt het beeld meer dan 15 s achter, dan meldt het bord dat; boven de 30 s
+zet het de uitzending opnieuw in om weer bij de tijd te komen. Richtlijn:
+
+| Formaat | Nodig |
+|---|---|
+| 720p25 met een live klok | ongeveer 1 kern (de standaard) |
+| 1080p25 met een live klok | 2 tot 3 kernen |
+| 1080p50 of 50i met een live klok | 4 kernen |
+
+Daarom maakt de installer standaard een container met 2 cores. Meer mag:
+`CORES=4 bash <(curl …)`.
+
+**Een nieuwe lus overschrijft nooit het bestand dat loopt.** Het bord bouwt naar een
+nieuw bestand (`lus-<tijdstip>.mp4`) en zet de uitzending pas over als het klaar is.
+Schrijf je over het bestand heen dat een lopende uitzending leest, dan struikelt
+ffmpeg halverwege over de nieuwe inhoud (decodeerfouten) en valt de uitzending stil.
+
 ![kijkpagina op de telefoon](docs/img/kijkpagina-telefoon.png)
 
 ## Beheer in de container

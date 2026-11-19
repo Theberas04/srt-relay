@@ -141,17 +141,41 @@ class HttpKijker:
         self.gestopt = threading.Event()
         self.verzonden = 0
         self.gemist = 0
+        self.bijgesprongen = 0
         self.thread = threading.Thread(target=self._verzend, daemon=True,
                                        name=f"http-{naam}")
 
     def start(self) -> None:
         self.thread.start()
 
-    def stuur(self, brok: bytes) -> None:
+    def stuur(self, brok: bytes) -> bool:
+        """Zet een brok in de wachtrij; onwaar = de kijker houdt het niet bij."""
         try:
             self._rij.put_nowait(brok)
+            return True
         except queue.Full:
             self.gemist += 1
+            return False
+
+    def spring_naar_live(self, aanloop: bytes) -> None:
+        """Haal de opgelopen achterstand weg en begin bij het laatste keyframe.
+
+        Een kijker die niet bijhoudt mag de stroom niet beschadigen (geen gat
+        midden in een beeldgroep, daar blijft een speler op hangen), maar ook
+        niet eindeloos achterblijven: dan kijkt hij minuten later dan de rest.
+        Daarom gooien we zijn wachtrij leeg en zetten hem op het laatste
+        keyframe. Hij slaat dus hele beeldgroepen over in plaats van brokken,
+        en omdat elk pakket heel blijft, blijft de stroom over TCP heel.
+        """
+        while True:
+            try:
+                self._rij.get_nowait()
+            except queue.Empty:
+                break
+        self.bijgesprongen += 1
+        try:
+            self._rij.put_nowait(aanloop)
+        except queue.Full:
             self.sluit()
 
     def _verzend(self) -> None:
@@ -205,6 +229,7 @@ class Stroom:
         self._pes_start = 0                 # waar begon het laatste beeld?
         self.aanloop_vol = False
         self.kijker_gemist = 0
+        self.kijker_bijgesprongen = 0
         self.kijker_weggegooid = 0
         self.ts = tssplit.TsKijker()
         self.stroomtijd: float | None = None
@@ -384,6 +409,8 @@ class Stroom:
                 self.http_kijkers.remove(kijker)
                 if kijker.gemist:
                     self.kijker_gemist += kijker.gemist
+                if kijker.bijgesprongen:
+                    self.kijker_bijgesprongen += kijker.bijgesprongen
                 aantal = self.aantal_kijkers
             else:
                 aantal = None
@@ -427,7 +454,10 @@ class Stroom:
                         self.srt_kijkers.remove(kijker)
                 kijker.sluit()
         for kijker in http_kijkers:
-            kijker.stuur(brok)
+            if not kijker.stuur(brok):
+                # De kijker houdt het niet bij: laat hem hele beeldgroepen
+                # overslaan in plaats van de stroom te beschadigen.
+                kijker.spring_naar_live(self._aanloop_bytes())
 
     def _werk_lus(self) -> None:
         """Ontleedt de stroom: programmatabel, keyframes, segmenten en aanloop."""
@@ -513,6 +543,7 @@ class Stroom:
             "srt_kijkers": len(self.srt_kijkers),
             "http_kijkers": len(self.http_kijkers),
             "gemist": self.kijker_gemist,
+            "bijgesprongen": self.kijker_bijgesprongen,
             "segmenten": self.hls.teller,
             "sporen": self._sporen(),
             # Het aantal échte sporen uit de programmatabel. "_sporen" geeft de
