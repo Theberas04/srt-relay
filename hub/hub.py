@@ -299,7 +299,11 @@ class Stroom:
                 continue                     # intussen opgeruimd: volgende proberen
             klaar = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                 "-i", nieuwste, "-frames:v", "1", "-vf", "scale=640:-2",
+                 # yadif=deint=interlaced ontdubbelt alleen wat interlaced is:
+                 # een telefoon laat een interlaced frame anders zien als een
+                 # beeld met strepen halverwege.
+                 "-i", nieuwste, "-frames:v", "1",
+                 "-vf", "yadif=deint=interlaced,scale=640:-2",
                  "-q:v", "6", "-strict", "unofficial", "-update", "1",
                  "-t", "3", "-f", "image2", tijdelijk],
                 capture_output=True, timeout=15)
@@ -955,7 +959,8 @@ class HttpKant(BaseHTTPRequestHandler):
             nieuw = os.path.join(map_, "beeld.jpg")
             tijdelijk = nieuw + ".nieuw"
             opdracht = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                        "-i", nieuwste, "-frames:v", "1", "-q:v", "4",
+                        "-i", nieuwste, "-frames:v", "1",
+                        "-vf", "yadif=deint=interlaced", "-q:v", "4",
                         "-strict", "unofficial", "-update", "1",
                         "-f", "image2", tijdelijk]
             try:

@@ -72,6 +72,7 @@ def peil(pad: str) -> dict:
     return {
         "bestand": os.path.basename(pad),
         "pad": pad,
+        "veldorde": beeld.get("field_order") or "progressive",
         "duur": round(duur, 3),
         "breedte": int(beeld.get("width") or 0),
         "hoogte": int(beeld.get("height") or 0),
@@ -126,6 +127,11 @@ def bouw_filter(bronnen: list[str], opties: dict, aantal_kanalen: int,
     # 25 frames per seconde met elk twee velden — dat is pas echt 50i. Alleen de
     # vlag zetten levert 25p in een interlaced jasje op.
     veld_fps = float(opties["fps"])
+    if opties.get("interlaced") and veld_fps < 50:
+        # Interlaced werkt in velden: met 25 komt de frameteller op 12,5 beelden
+        # per seconde uit (elk frame bevat twee velden) en dat is geen 50i maar
+        # een schokkerig, versmeerd beeld. Interlaced houdt daarom 50 velden aan.
+        veld_fps = 50.0
     tussen_fps = veld_fps
     uit_fps = veld_fps / 2 if opties.get("interlaced") else veld_fps
     opties["uit_fps"] = uit_fps
@@ -148,8 +154,12 @@ def bouw_filter(bronnen: list[str], opties: dict, aantal_kanalen: int,
     vorige = "[beeld]"
 
     if opties.get("interlaced"):
+        # Eerst ontdubbelen (yadif), dan pas velden vlechten. Gaat een bron die
+        # al interlaced is rechtstreeks door de vlechter, dan wordt het dubbel
+        # interlaced en versmeert de onderste helft van het beeld.
         # setfield=tff in plaats van -top: dat laatste is vervallen in ffmpeg 7
-        stap.append(f"{vorige}tinterlace=mode=interleave_top:flags=vlpf,"
+        stap.append(f"{vorige}yadif=deint=interlaced,"
+                    "tinterlace=mode=interleave_top:flags=vlpf,"
                     "setfield=tff[beeldi]")
         vorige = "[beeldi]"
 
@@ -347,13 +357,23 @@ def bouw_uitzend_opdracht(looppad: str, host: str, poort: int, naam: str,
         breedte = int(opties.get("breedte") or 1920)
         hoogte = int(opties.get("hoogte") or 1080)
         veld_fps = float(opties.get("fps") or 25)
+        if opties.get("interlaced") and veld_fps < 50:
+            veld_fps = 50.0                 # zie bouw_filter: 25 zou 12,5 worden
         uit_fps = veld_fps / 2 if opties.get("interlaced") else veld_fps
         # keyframe elke twee seconden: zonder deze grens kiest x264 250 beelden
         # (tien seconden) en dan wacht een late kijker tien seconden op beeld en
         # worden de HLS-segmenten tien seconden lang
         gop = max(1, int(round(uit_fps * 2)))
+        filter_beeld = klok_filter(breedte, hoogte)
+        if opties.get("interlaced"):
+            # Ontdubbelen, de klok tekenen en dan pas weer velden vlechten: de
+            # lus is immers al interlaced en mag niet nóg een keer door de
+            # vlechter (dat gaf de versmering halverwege het beeld).
+            filter_beeld = ("yadif=deint=interlaced," + filter_beeld
+                            + ",tinterlace=mode=interleave_top:flags=vlpf,"
+                              "setfield=tff")
         opdracht += [
-            "-vf", klok_filter(breedte, hoogte),
+            "-vf", filter_beeld,
             "-c:v", "libx264", "-preset", str(opties.get("preset") or "veryfast"),
             "-b:v", str(opties.get("bitrate") or "6M"),
             "-profile:v", "high", "-bf", "0",
